@@ -1,9 +1,0 @@
-import matematicas
-
-fn Main():
-    Print("el doble de 21 es {matematicas.Doble(21)}")
-    Print("2 a la 10 = {matematicas.Potencia(2, 10)}")
-    let A = matematicas.Punto(X: 3.0, Y: 4.0)
-    let B = matematicas.Punto(X: 1.0, Y: 1.0)
-    let D = A.Resta(B)
-    Print("distancia al origen de A-B: {D.Norma()}")

@@ -1,5 +1,0 @@
-fn Main():
-    let Nombre = "Ada"
-    Print("Hola, {Nombre}")
-    Print("Adiós, {Nombre2}")
-

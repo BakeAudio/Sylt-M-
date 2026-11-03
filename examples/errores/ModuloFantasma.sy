@@ -1,4 +1,0 @@
-import geometria
-
-fn Main():
-    Print(geometria.PI())
