@@ -1,0 +1,11 @@
+type Contador:
+    Valor: int = 0
+
+    fn Sube(self, N: int):
+        self.Valor += N
+
+fn Main():
+    let C = Contador(Valor: 5)
+    C.Sube(3)
+    Print("total: {C.Valor}")
+

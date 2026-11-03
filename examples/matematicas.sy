@@ -1,0 +1,18 @@
+type Punto:
+    X: float
+    Y: float
+
+    fn Resta(self, Otro: Punto) -> Punto:
+        return Punto(X: self.X - Otro.X, Y: self.Y - Otro.Y)
+
+    fn Norma(self) -> float:
+        return Sqrt(self.X * self.X + self.Y * self.Y)
+
+fn Doble(X: int) -> int:
+    return X * 2
+
+fn Potencia(Base: int, Exp: int) -> int:
+    var R = 1
+    for _ in 0..Exp:
+        R *= Base
+    return R

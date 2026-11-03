@@ -1,0 +1,14 @@
+enum Semforo:
+    Rojo
+    mbar
+    Verde
+
+fn Actuamos(S: Semforo) -> string:
+    match S:
+        case Rojo:
+            return "parados"
+        case Verde:
+            return "marchando"
+
+fn Main():
+    Print(Actuamos(Semforo.Verde))

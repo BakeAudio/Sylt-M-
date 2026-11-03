@@ -1,0 +1,8 @@
+foreign:
+    fn sy_time_epoch_ms() -> int
+
+fn AhoraMs() -> int:
+    return sy_time_epoch_ms()
+
+fn MonoMs() -> float:
+    return TiempoMs()

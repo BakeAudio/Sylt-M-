@@ -1,0 +1,6 @@
+fn Main():
+    let Edad = 25
+    let Saludo = "Hola"
+    if Edad < Saludo:
+        Print("nunca")
+

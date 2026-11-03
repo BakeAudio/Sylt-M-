@@ -1,0 +1,32 @@
+
+type Jugador:
+    Nombre: string
+    Puntos: int = 0
+
+    fn Saludar(self):
+        Print("Soy {self.Nombre} ({self.Puntos} puntos)")
+
+    fn SumarPuntos(mut self, N: int):
+        self.Puntos += N
+
+fn SubirNivel(J: &mut Jugador):
+    J.SumarPuntos(100)
+
+fn LeerPuntos(J: &Jugador) -> int:
+    return J.Puntos
+
+fn Main():
+    var Heroe = Jugador(Nombre: "Ada")
+    Heroe.SumarPuntos(10)
+    SubirNivel(&Heroe)              # préstamo mutable
+    Heroe.Saludar()
+
+    let N = LeerPuntos(&Heroe)      # préstamo inmutable
+    Print("puntos leídos con &: {N}")
+
+    let Respaldo = Clone(Heroe)
+
+    let Traspaso = Heroe
+    Traspaso.Saludar()
+    Respaldo.Saludar()
+

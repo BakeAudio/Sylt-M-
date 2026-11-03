@@ -1,0 +1,12 @@
+foreign:
+    include <cmath>
+    fn fmod(X: float, Y: float) -> float
+    fn sin(X: float) -> float
+    include <cstdlib>
+    fn atoi(S: string) -> int
+
+fn Main():
+    Print("sin(pi/2) ≈ {sin(3.14159265 / 2.0)}")
+    Print("fmod(10, 3) = {fmod(10.0, 3.0)}")
+    Print("atoi(\"2026\") + 1 = {atoi(\"2026\") + 1}")
+    Print("también hay Sqrt, Abs, Min, Max, Pow, Floor integrados: {Sqrt(2.0)}")

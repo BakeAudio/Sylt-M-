@@ -1,0 +1,36 @@
+foreign:
+    fn sy_net_conectar(Host: string, Puerto: int) -> int
+    fn sy_net_enviar(Con: int, Datos: string)
+    fn sy_net_recibir(Con: int, Max: int) -> string
+    fn sy_net_cerrar(Con: int)
+    fn sy_net_escuchar(Puerto: int) -> int
+    fn sy_net_aceptar(Servidor: int) -> int
+    fn sy_net_direccion(Con: int) -> string
+    fn SyltAbort(Msg: string)
+
+fn TcpIntentar(Host: string, Puerto: int) -> int:
+    return sy_net_conectar(Host, Puerto)
+
+fn TcpConectar(Host: string, Puerto: int) -> int:
+    let C = sy_net_conectar(Host, Puerto)
+    if C < 0:
+        SyltAbort("no puedo conectar a " + Host + ":" + Str(Puerto))
+    return C
+
+fn TcpEnviar(Con: int, Datos: string):
+    sy_net_enviar(Con, Datos)
+
+fn TcpRecibir(Con: int, Max: int) -> string:
+    return sy_net_recibir(Con, Max)
+
+fn TcpCerrar(Con: int):
+    sy_net_cerrar(Con)
+
+fn TcpEscuchar(Puerto: int) -> int:
+    return sy_net_escuchar(Puerto)
+
+fn TcpAceptar(Servidor: int) -> int:
+    return sy_net_aceptar(Servidor)
+
+fn TcpDireccion(Con: int) -> string:
+    return sy_net_direccion(Con)

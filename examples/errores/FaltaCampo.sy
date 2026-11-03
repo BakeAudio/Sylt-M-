@@ -1,0 +1,8 @@
+type Punto:
+    X: int
+    Y: int
+
+fn Main():
+    let P = Punto(X: 1)
+    Print("{P.X + P.Y}")
+

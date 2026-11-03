@@ -1,0 +1,26 @@
+
+fn MinMax(A: int, B: int) -> (int, int):
+    if A < B:
+        return (A, B)
+    return (B, A)
+
+fn Main():
+    var Numeros = [5, 3, 9, 1]
+    Print("números: {Numeros}")
+    Print("total: {Numeros.Len()}")
+
+    Numeros.Push(7)
+    let Ultimo = Numeros.Pop()
+    Print("tras Push(7) y Pop(): {Numeros} (salió el {Ultimo})")
+
+    Print("¿contiene el 3? {Numeros.Contiene(3)}")
+
+    let Edades = { "Ana": 31, "Luis": 25, "Marta": 28 }
+    Print("edades: {Edades}")
+    for Nombre in Edades:
+        Print("  {Nombre} -> {Edades[Nombre]} años")
+    Print("¿está Ana? {Edades.Contiene(\"Ana\")}")
+
+    let (Menor, Mayor) = MinMax(14, 7)
+    Print("entre 14 y 7: min={Menor}, max={Mayor}")
+

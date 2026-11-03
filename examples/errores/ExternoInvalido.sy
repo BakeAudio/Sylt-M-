@@ -1,0 +1,9 @@
+type Config:
+    Nombre: string
+    Puerto: int
+
+foreign:
+    fn abrir_config(C: Config) -> int
+
+fn Main():
+    Print("nada que ejecutar")

@@ -1,0 +1,54 @@
+import std.net
+import std.str
+import std.time
+
+fn TextoEstado(Codigo: int) -> string:
+    match Codigo:
+        case 200:
+            return "OK"
+        case 400:
+            return "Peticion incorrecta"
+        case 404:
+            return "No encontrado"
+        case _:
+            return "?"
+
+fn Responder(Cliente: int, Codigo: int, Tipo: string, Cuerpo: string):
+    let Cabecera = "HTTP/1.1 " + Str(Codigo) + " " + TextoEstado(Codigo) +
+        "\r\nContent-Type: " + Tipo +
+        "\r\nContent-Length: " + Str(Cuerpo.Len()) +
+        "\r\nConnection: close\r\n\r\n"
+    std.net.TcpEnviar(Cliente, Cabecera + Cuerpo)
+    std.net.TcpCerrar(Cliente)
+
+fn Atender(Cliente: int, Direccion: string):
+    let Peticion = std.net.TcpRecibir(Cliente, 65536)
+    if Peticion.Len() == 0:
+        std.net.TcpCerrar(Cliente)
+        return
+    let FinLinea = std.str.Buscar(Peticion, "\r\n")
+    let Linea = std.str.Subcadena(Peticion, 0, FinLinea)
+    let Partes = std.str.Dividir(Linea, " ")
+    Print("[{Direccion}] {Linea}")
+    if Partes.Len() < 2:
+        Responder(Cliente, 400, "text/plain; charset=utf-8", "peticion malformada")
+        return
+    let Ruta = Partes[1]
+    if Ruta == "/":
+        Responder(Cliente, 200, "text/html; charset=utf-8",
+            "<h1>Servidor en Sylt</h1><p>prueba <a href=\"/saludo\">/saludo</a> y <a href=\"/hora\">/hora</a></p>")
+    elif Ruta == "/saludo":
+        Responder(Cliente, 200, "text/plain; charset=utf-8", "¡Hola desde Sylt!")
+    elif Ruta == "/hora":
+        Responder(Cliente, 200, "text/plain; charset=utf-8",
+            "milisegundos desde 1970: {std.time.AhoraMs()}")
+    else:
+        Responder(Cliente, 404, "text/plain; charset=utf-8", "no conozco la ruta {Ruta}")
+
+fn Main():
+    let Servidor = std.net.TcpEscuchar(8080)
+    Print("Servidor Sylt escuchando en http://127.0.0.1:8080")
+    Print("(Ctrl+C para parar)")
+    while true:
+        let Cliente = std.net.TcpAceptar(Servidor)
+        Atender(Cliente, std.net.TcpDireccion(Cliente))
