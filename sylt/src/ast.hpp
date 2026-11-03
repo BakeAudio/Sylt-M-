@@ -62,6 +62,7 @@ struct Program;
 using ExprP = std::unique_ptr<Expr>;
 using StmtP = std::unique_ptr<Stmt>;
 using ProgramP = std::unique_ptr<Program>;
+struct TypeAnn;
 struct Expr {
     enum class Kind {
         IntLit, FloatLit, BoolLit, StrLit, Ident,
@@ -125,6 +126,8 @@ struct CallExpr : Expr {
     std::string TargetName;
     std::string VariantName;
     std::vector<bool> ArgCastFloat;
+    std::vector<bool> ArgMoved;
+    std::vector<TypeAnn> TypeArgs;
     bool ReceiverMutable = false;
     CallExpr() : Expr(Kind::Call) {}
 };
@@ -145,11 +148,13 @@ struct MemberExpr : Expr {
 };
 struct ArrayLitExpr : Expr {
     std::vector<ExprP> Elems;
+    std::vector<bool> ElemsMoved;
     ArrayLitExpr() : Expr(Kind::ArrayLit) {}
 };
 struct MapPair {
     ExprP Key, Val;
     Span Sp;
+    bool ValMoved = false;
 };
 struct MapLitExpr : Expr {
     std::vector<MapPair> Pairs;
@@ -171,11 +176,13 @@ struct Block {
     Span Sp;
 };
 struct TypeAnn {
-    enum class K { None, Prim, Ident, Array, Map, Tuple, Borrow };
+    enum class K { None, Prim, Ident, Generic, Array, Map, Tuple, Borrow };
     K k = K::None;
     std::string Name;
     bool Mut = false;
     std::vector<TypeAnn> Sub;
+    bool HasResolvedTy = false;
+    Type ResolvedTy;
     Span Sp;
 };
 struct Param {
@@ -208,6 +215,7 @@ struct FieldDecl {
 };
 struct TypeDecl {
     std::string Name;
+    std::vector<std::string> TypeParams;
     std::vector<FieldDecl> Fields;
     std::vector<std::unique_ptr<FnDecl>> Methods;
     Span Sp;
@@ -227,6 +235,7 @@ struct AssignStmt : Stmt {
     std::string Op;
     ExprP Target;
     ExprP Value;
+    bool ValMoved = false;
     AssignStmt() : Stmt(Kind::Assign) {}
 };
 struct ExprStmt : Stmt {

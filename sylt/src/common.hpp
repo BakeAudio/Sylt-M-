@@ -62,6 +62,17 @@ inline int Levenshtein(const std::string& a, const std::string& b) {
     }
     return prev[m];
 }
+inline std::string CppId(const std::string& n) {
+    if (n.find('[') == std::string::npos) return n;
+    std::string o;
+    for (char c : n) {
+        if (c == '[') o += "_of_";
+        else if (c == ']') {}
+        else if (c == ',') o += "_y_";
+        else o += c;
+    }
+    return o;
+}
 inline bool CloseEnough(const std::string& a, const std::string& b) {
     if (a == b) return false;
     int d = Levenshtein(a, b);

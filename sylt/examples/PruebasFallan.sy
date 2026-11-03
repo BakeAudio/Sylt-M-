@@ -1,0 +1,8 @@
+fn Suma(A: int, B: int) -> int:
+    return A + B
+
+fn PruebaSumaBien():
+    Afirma(Suma(2, 3) == 5, "Suma(2, 3) debería ser 5")
+
+fn PruebaSumaMal():
+    Afirma(Suma(1, 1) == 3, "fallo a propósito para ver el informe")

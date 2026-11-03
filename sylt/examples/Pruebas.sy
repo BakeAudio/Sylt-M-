@@ -1,0 +1,30 @@
+fn Doble(N: int) -> int:
+    return N * 2
+
+fn PruebaDoble():
+    Afirma(Doble(2) == 4, "Doble(2) debería ser 4")
+    Afirma(Doble(0) == 0, "Doble(0) debería ser 0")
+    Afirma(Doble(-3) == -6, "Doble(-3) debería ser -6")
+
+fn PruebaTextos():
+    let Saludo = "Hola, " + "Sylt"
+    Afirma(Saludo == "Hola, Sylt", "la suma de textos falla")
+    let N = 7
+    Afirma("{N}*" == "7*", "la interpolación falla")
+
+fn PruebaColecciones():
+    var Lista = [1, 2, 3]
+    Lista.Push(4)
+    Afirma(Lista.Len() == 4, "Len tras Push debería ser 4")
+    Afirma(Lista.Pop() == 4, "Pop debería devolver el 4")
+    Afirma(Lista.Contiene(2), "Contiene(2) debería ser verdad")
+
+fn PruebaMatch():
+    var Total = 0
+    for I in 0..5:
+        match I % 2:
+            case 0:
+                Total += 1
+            case _:
+                Total += 10
+    Afirma(Total == 23, "el recuento del match debería ser 23")

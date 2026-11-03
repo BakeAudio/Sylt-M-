@@ -1,6 +1,6 @@
 fn Main():
     let Nombre = "Sylt"
-    let Version = 0.3
+    let Version = 0.4
     Print("¡Hola, {Nombre} {Version}!")
     Print("Compilado a C++ nativo: velocidad sin despeinarse.")
 

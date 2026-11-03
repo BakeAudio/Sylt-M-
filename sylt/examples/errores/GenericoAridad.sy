@@ -1,0 +1,6 @@
+type Caja[T]:
+    Valor: T
+
+fn Main():
+    let C = Caja[int, string](Valor: 1)
+    Print("{C.Valor}")

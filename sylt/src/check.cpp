@@ -47,12 +47,371 @@ struct VariantInfo {
     int Index = 0;
     Span Sp;
 };
+TypeAnn CloneTypeAnn(const TypeAnn& a) {
+    TypeAnn o;
+    o.k = a.k;
+    o.Name = a.Name;
+    o.Mut = a.Mut;
+    o.Sp = a.Sp;
+    o.HasResolvedTy = a.HasResolvedTy;
+    o.ResolvedTy = a.ResolvedTy;
+    for (auto& s : a.Sub) o.Sub.push_back(CloneTypeAnn(s));
+    return o;
+}
+ExprP CloneExpr(const Expr* e);
+Block CloneBlock(const Block& b);
+StmtP CloneStmt(const Stmt* s) {
+    switch (s->K) {
+        case Stmt::Kind::Let: {
+            auto* p = static_cast<const LetStmt*>(s);
+            auto o = std::make_unique<LetStmt>();
+            o->Mutable = p->Mutable;
+            o->Names = p->Names;
+            o->Destructure = p->Destructure;
+            o->HasTy = p->HasTy;
+            o->Ty = CloneTypeAnn(p->Ty);
+            if (p->Init) o->Init = CloneExpr(p->Init.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::Assign: {
+            auto* p = static_cast<const AssignStmt*>(s);
+            auto o = std::make_unique<AssignStmt>();
+            o->Op = p->Op;
+            o->Target = CloneExpr(p->Target.get());
+            o->Value = CloneExpr(p->Value.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::Expr: {
+            auto* p = static_cast<const ExprStmt*>(s);
+            auto o = std::make_unique<ExprStmt>();
+            o->Sub = CloneExpr(p->Sub.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::Return: {
+            auto* p = static_cast<const ReturnStmt*>(s);
+            auto o = std::make_unique<ReturnStmt>();
+            if (p->Value) o->Value = CloneExpr(p->Value.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::If: {
+            auto* p = static_cast<const IfStmt*>(s);
+            auto o = std::make_unique<IfStmt>();
+            o->Cond = CloneExpr(p->Cond.get());
+            o->Then = CloneBlock(p->Then);
+            for (auto& br : p->Elifs) {
+                IfStmt::Branch nb;
+                nb.Cond = CloneExpr(br.Cond.get());
+                nb.Body = CloneBlock(br.Body);
+                o->Elifs.push_back(std::move(nb));
+            }
+            o->HasElse = p->HasElse;
+            o->Else = CloneBlock(p->Else);
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::While: {
+            auto* p = static_cast<const WhileStmt*>(s);
+            auto o = std::make_unique<WhileStmt>();
+            o->Cond = CloneExpr(p->Cond.get());
+            o->Body = CloneBlock(p->Body);
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::For: {
+            auto* p = static_cast<const ForStmt*>(s);
+            auto o = std::make_unique<ForStmt>();
+            o->Var = p->Var;
+            o->IsRange = p->IsRange;
+            if (p->Low) o->Low = CloneExpr(p->Low.get());
+            if (p->High) o->High = CloneExpr(p->High.get());
+            o->Body = CloneBlock(p->Body);
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::Match: {
+            auto* p = static_cast<const MatchStmt*>(s);
+            auto o = std::make_unique<MatchStmt>();
+            o->Subject = CloneExpr(p->Subject.get());
+            for (auto& arm : p->Arms) {
+                MatchArm na;
+                na.Pat.k = arm.Pat.k;
+                na.Pat.Name = arm.Pat.Name;
+                na.Pat.Qualified = arm.Pat.Qualified;
+                na.Pat.Bindings = arm.Pat.Bindings;
+                if (arm.Pat.Lit) na.Pat.Lit = CloneExpr(arm.Pat.Lit.get());
+                na.Pat.Sp = arm.Pat.Sp;
+                na.Body = CloneBlock(arm.Body);
+                o->Arms.push_back(std::move(na));
+            }
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Stmt::Kind::Break:
+        case Stmt::Kind::Continue:
+        case Stmt::Kind::Pass: {
+            auto o = std::make_unique<Stmt>(s->K);
+            o->Sp = s->Sp;
+            return o;
+        }
+    }
+    auto o = std::make_unique<Stmt>(s->K);
+    o->Sp = s->Sp;
+    return o;
+}
+Block CloneBlock(const Block& b) {
+    Block o;
+    o.Sp = b.Sp;
+    for (auto& s : b.Stmts) o.Stmts.push_back(CloneStmt(s.get()));
+    return o;
+}
+ExprP CloneExpr(const Expr* e) {
+    switch (e->K) {
+        case Expr::Kind::IntLit: {
+            auto* p = static_cast<const IntLitExpr*>(e);
+            auto o = std::make_unique<IntLitExpr>();
+            o->Val = p->Val;
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::FloatLit: {
+            auto* p = static_cast<const FloatLitExpr*>(e);
+            auto o = std::make_unique<FloatLitExpr>();
+            o->Val = p->Val;
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::BoolLit: {
+            auto* p = static_cast<const BoolLitExpr*>(e);
+            auto o = std::make_unique<BoolLitExpr>();
+            o->Val = p->Val;
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::StrLit: {
+            auto* p = static_cast<const StrLitExpr*>(e);
+            auto o = std::make_unique<StrLitExpr>();
+            for (auto& part : p->Parts) {
+                StrPart np;
+                np.IsText = part.IsText;
+                np.Text = part.Text;
+                if (part.Sub) np.Sub = CloneExpr(part.Sub.get());
+                o->Parts.push_back(std::move(np));
+            }
+            o->HasInterp = p->HasInterp;
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::Ident: {
+            auto* p = static_cast<const IdentExpr*>(e);
+            auto o = std::make_unique<IdentExpr>();
+            o->Name = p->Name;
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::Unary: {
+            auto* p = static_cast<const UnaryExpr*>(e);
+            auto o = std::make_unique<UnaryExpr>();
+            o->Op = p->Op;
+            o->Sub = CloneExpr(p->Sub.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::Binary: {
+            auto* p = static_cast<const BinaryExpr*>(e);
+            auto o = std::make_unique<BinaryExpr>();
+            o->Op = p->Op;
+            o->L = CloneExpr(p->L.get());
+            o->R = CloneExpr(p->R.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::Call: {
+            auto* p = static_cast<const CallExpr*>(e);
+            auto o = std::make_unique<CallExpr>();
+            o->Callee = CloneExpr(p->Callee.get());
+            for (auto& a : p->Args) {
+                Arg na;
+                na.Name = a.Name;
+                na.Borrowed = a.Borrowed;
+                na.Value = CloneExpr(a.Value.get());
+                na.Sp = a.Sp;
+                o->Args.push_back(std::move(na));
+            }
+            for (auto& ta : p->TypeArgs) o->TypeArgs.push_back(CloneTypeAnn(ta));
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::Index: {
+            auto* p = static_cast<const IndexExpr*>(e);
+            auto o = std::make_unique<IndexExpr>();
+            o->Base = CloneExpr(p->Base.get());
+            o->Idx = CloneExpr(p->Idx.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::Member: {
+            auto* p = static_cast<const MemberExpr*>(e);
+            auto o = std::make_unique<MemberExpr>();
+            o->Name = p->Name;
+            o->NameSp = p->NameSp;
+            o->Base = CloneExpr(p->Base.get());
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::ArrayLit: {
+            auto* p = static_cast<const ArrayLitExpr*>(e);
+            auto o = std::make_unique<ArrayLitExpr>();
+            for (auto& el : p->Elems) o->Elems.push_back(CloneExpr(el.get()));
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::MapLit: {
+            auto* p = static_cast<const MapLitExpr*>(e);
+            auto o = std::make_unique<MapLitExpr>();
+            for (auto& pr : p->Pairs) {
+                MapPair np;
+                np.Key = CloneExpr(pr.Key.get());
+                np.Val = CloneExpr(pr.Val.get());
+                np.Sp = pr.Sp;
+                o->Pairs.push_back(std::move(np));
+            }
+            o->Sp = p->Sp;
+            return o;
+        }
+        case Expr::Kind::TupleLit: {
+            auto* p = static_cast<const TupleLitExpr*>(e);
+            auto o = std::make_unique<TupleLitExpr>();
+            for (auto& el : p->Elems) o->Elems.push_back(CloneExpr(el.get()));
+            o->Sp = p->Sp;
+            return o;
+        }
+    }
+    auto o = std::make_unique<IntLitExpr>();
+    o->Sp = e->Sp;
+    return o;
+}
+std::unique_ptr<FnDecl> CloneFn(const FnDecl* fd) {
+    auto o = std::make_unique<FnDecl>();
+    o->Name = fd->Name;
+    for (auto& p : fd->Params) {
+        Param np;
+        np.Name = p.Name;
+        np.IsSelf = p.IsSelf;
+        np.Mut = p.Mut;
+        np.HasTy = p.HasTy;
+        np.Ty = CloneTypeAnn(p.Ty);
+        np.Sp = p.Sp;
+        o->Params.push_back(std::move(np));
+    }
+    o->HasRet = fd->HasRet;
+    o->Ret = CloneTypeAnn(fd->Ret);
+    o->Body = CloneBlock(fd->Body);
+    o->Sp = fd->Sp;
+    o->IsMethod = fd->IsMethod;
+    o->SelfMut = fd->SelfMut;
+    o->OwnerStruct = fd->OwnerStruct;
+    o->Foreign = false;
+    o->Module = fd->Module;
+    return o;
+}
+std::unique_ptr<TypeDecl> CloneTypeDecl(const TypeDecl* td) {
+    auto o = std::make_unique<TypeDecl>();
+    o->Name = td->Name;
+    o->TypeParams = td->TypeParams;
+    for (auto& f : td->Fields) {
+        FieldDecl nf;
+        nf.Name = f.Name;
+        nf.Ty = CloneTypeAnn(f.Ty);
+        nf.HasDefault = f.HasDefault;
+        if (f.Default) nf.Default = CloneExpr(f.Default.get());
+        nf.Sp = f.Sp;
+        o->Fields.push_back(std::move(nf));
+    }
+    for (auto& m : td->Methods) o->Methods.push_back(CloneFn(m.get()));
+    o->Sp = td->Sp;
+    o->Module = td->Module;
+    return o;
+}
 struct ModuleInfo {
     std::string Name;
     std::unordered_map<std::string, std::string> Fns;
     std::unordered_map<std::string, std::string> Types;
     std::unordered_map<std::string, std::string> Enums;
     Span Sp;
+};
+void SubstTypeAnn(TypeAnn& a, const std::vector<std::string>& params,
+                  const std::vector<Type>& args) {
+    switch (a.k) {
+        case TypeAnn::K::Ident:
+            for (size_t i = 0; i < params.size(); i++) {
+                if (a.Name == params[i]) {
+                    a.HasResolvedTy = true;
+                    a.ResolvedTy = args[i];
+                    return;
+                }
+            }
+            return;
+        case TypeAnn::K::Array:
+            if (!a.Sub.empty()) SubstTypeAnn(a.Sub[0], params, args);
+            return;
+        case TypeAnn::K::Map:
+            if (a.Sub.size() > 0) SubstTypeAnn(a.Sub[0], params, args);
+            if (a.Sub.size() > 1) SubstTypeAnn(a.Sub[1], params, args);
+            return;
+        case TypeAnn::K::Tuple:
+        case TypeAnn::K::Generic:
+        case TypeAnn::K::Borrow:
+            for (auto& s : a.Sub) SubstTypeAnn(s, params, args);
+            return;
+        default:
+            return;
+    }
+}
+void SubstStmt(Stmt* st, const std::vector<std::string>& params,
+               const std::vector<Type>& args);
+void SubstBlock(Block& b, const std::vector<std::string>& params,
+                const std::vector<Type>& args) {
+    for (auto& s : b.Stmts) SubstStmt(s.get(), params, args);
+}
+void SubstStmt(Stmt* st, const std::vector<std::string>& params,
+               const std::vector<Type>& args) {
+    switch (st->K) {
+        case Stmt::Kind::Let: {
+            auto* s = static_cast<LetStmt*>(st);
+            if (s->HasTy) SubstTypeAnn(s->Ty, params, args);
+            return;
+        }
+        case Stmt::Kind::If: {
+            auto* s = static_cast<IfStmt*>(st);
+            SubstBlock(s->Then, params, args);
+            for (auto& br : s->Elifs) SubstBlock(br.Body, params, args);
+            if (s->HasElse) SubstBlock(s->Else, params, args);
+            return;
+        }
+        case Stmt::Kind::While:
+            SubstBlock(static_cast<WhileStmt*>(st)->Body, params, args);
+            return;
+        case Stmt::Kind::For:
+            SubstBlock(static_cast<ForStmt*>(st)->Body, params, args);
+            return;
+        case Stmt::Kind::Match: {
+            auto* s = static_cast<MatchStmt*>(st);
+            for (auto& arm : s->Arms) SubstBlock(arm.Body, params, args);
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+struct GenericInfo {
+    TypeDecl* TD = nullptr;
+    std::string Key;
+    std::string Module;
 };
 struct VarInfo {
     Type Ty;
@@ -71,7 +430,7 @@ struct BuiltinDef {
 const std::vector<BuiltinDef> kBuiltinNames = {
     {"Print", 1, 1}, {"Str", 1, 1},   {"Sqrt", 1, 1}, {"Abs", 1, 1},
     {"Min", 2, 2},   {"Max", 2, 2},   {"Pow", 2, 2},  {"Floor", 1, 1},
-    {"Clone", 1, 1}, {"TiempoMs", 0, 0},
+    {"Clone", 1, 1}, {"TiempoMs", 0, 0}, {"Afirma", 2, 2},
 };
 bool IsBuiltin(const std::string& n) {
     for (auto& b : kBuiltinNames)
@@ -87,6 +446,10 @@ public:
     std::unordered_map<std::string, EnumInfo> Enums;
     std::unordered_map<std::string, VariantInfo> Variantes;
     std::unordered_map<std::string, ModuleInfo> Mods;
+    std::unordered_map<std::string, GenericInfo> Generics;
+    std::vector<std::unique_ptr<TypeDecl>> InstDecls;
+    std::vector<std::pair<std::string, FnDecl*>> PendingCheck;
+    bool CheckingInstantiation = false;
     std::unordered_map<std::string, FnDecl*> Fns;
     std::vector<std::unordered_map<std::string, VarInfo>> Scopes;
     FnDecl* CurFn = nullptr;
@@ -138,6 +501,15 @@ public:
         }
         auto f = Enums.find(n);
         return f != Enums.end() ? &f->second : nullptr;
+    }
+    std::string FindGenericKey(const std::string& n) {
+        if (!CurModule.empty()) {
+            auto f = Generics.find(Mangle(CurModule, n));
+            if (f != Generics.end()) return f->second.Key;
+        }
+        auto f2 = Generics.find(n);
+        if (f2 != Generics.end()) return f2->second.Key;
+        return "";
     }
     const EnumVarInfo* FindVariantIn(const EnumInfo& ei, const std::string& vn) {
         for (auto& v : ei.Variants)
@@ -294,15 +666,158 @@ public:
         }
         return true;
     }
-    void MoveVar(Expr* e) {
-        if (e->K != Expr::Kind::Ident) return;
+    bool MoveVar(Expr* e) {
+        if (e->K != Expr::Kind::Ident) return false;
         auto* id = static_cast<IdentExpr*>(e);
         VarInfo* v = FindVar(id->Name);
-        if (!v || !v->Moveable || v->Moved) return;
+        if (!v || !v->Moveable || v->Moved) return false;
         v->Moved = true;
         v->MoveSp = e->Sp;
+        return true;
+    }
+    TypeAnn TypeAnnOf(const Type& t) {
+        TypeAnn a;
+        switch (t.K) {
+            case TK::Int: a.k = TypeAnn::K::Prim; a.Name = "int"; return a;
+            case TK::Float: a.k = TypeAnn::K::Prim; a.Name = "float"; return a;
+            case TK::Bool: a.k = TypeAnn::K::Prim; a.Name = "bool"; return a;
+            case TK::Str: a.k = TypeAnn::K::Prim; a.Name = "string"; return a;
+            case TK::Array:
+                a.k = TypeAnn::K::Array;
+                a.Sub.push_back(TypeAnnOf(t.Sub[0]));
+                return a;
+            case TK::Map:
+                a.k = TypeAnn::K::Map;
+                a.Sub.push_back(TypeAnnOf(t.Sub[0]));
+                a.Sub.push_back(TypeAnnOf(t.Sub[1]));
+                return a;
+            case TK::Tuple:
+                a.k = TypeAnn::K::Tuple;
+                for (auto& s : t.Sub) a.Sub.push_back(TypeAnnOf(s));
+                return a;
+            case TK::Struct:
+            case TK::Enum:
+                a.k = TypeAnn::K::Ident;
+                a.Name = t.Name;
+                return a;
+            default:
+                a.k = TypeAnn::K::Prim;
+                a.Name = "int";
+                return a;
+        }
+    }
+    void CollapseGenerics(TypeAnn& a) {
+        if (a.HasResolvedTy) return;
+        if (a.k == TypeAnn::K::Generic) {
+            Type t = ResolveType(a, false, false);
+            if (!t.IsError()) {
+                a.HasResolvedTy = true;
+                a.ResolvedTy = t;
+            }
+            return;
+        }
+        for (auto& s : a.Sub) CollapseGenerics(s);
+    }
+    std::string InstantiateGeneric(const std::string& genKey, const std::vector<Type>& args,
+                                   Span sp) {
+        auto g = Generics.find(genKey);
+        if (g == Generics.end()) return "";
+        GenericInfo gi = g->second;
+        const std::vector<std::string>& params = gi.TD->TypeParams;
+        if (args.size() != params.size()) {
+            std::string plist;
+            for (auto& p : params) plist += (plist.empty() ? "" : ", ") + p;
+            Diag d = Rep.Err("E0311", sp,
+                "`" + DisplayName(genKey) + "` espera " + std::to_string(params.size()) +
+                (params.size() == 1 ? " argumento de tipo" : " argumentos de tipo") +
+                " (" + plist + "), pero recibe " + std::to_string(args.size()));
+            d.Helps.push_back("ejemplo: " + DisplayName(genKey) + "[" +
+                              (params.empty() ? std::string("int")
+                                              : TypeName(args.empty() ? Type::Int() : args[0])) +
+                              "]");
+            Rep.Emit(d);
+            return "";
+        }
+        std::string pretty;
+        for (size_t i = 0; i < args.size(); i++) {
+            if (i) pretty += ",";
+            pretty += TypeName(args[i]);
+        }
+        std::string key = genKey + "[" + pretty + "]";
+        if (Structs.count(key)) return key;
+        for (auto& at : args) {
+            if (at.IsBorrow() || at.IsVoid()) {
+                Diag d = Rep.Err("E0312", sp,
+                    "el argumento de tipo `" + TypeName(at) + "` no es válido aquí");
+                d.Helps.push_back("usa un tipo completo: int, string, un struct tuyo...");
+                Rep.Emit(d);
+                return "";
+            }
+        }
+        auto inst = CloneTypeDecl(gi.TD);
+        inst->Name = key;
+        inst->Module = "";
+        inst->TypeParams.clear();
+        for (auto& f : inst->Fields) SubstTypeAnn(f.Ty, params, args);
+        for (auto& m : inst->Methods) {
+            for (auto& p : m->Params)
+                if (p.HasTy) SubstTypeAnn(p.Ty, params, args);
+            if (m->HasRet) SubstTypeAnn(m->Ret, params, args);
+            SubstBlock(m->Body, params, args);
+        }
+        StructInfo si;
+        si.Name = key;
+        si.Sp = gi.TD->Sp;
+        Structs[key] = std::move(si);
+        std::unordered_set<std::string> seenFields;
+        std::string savedMod = CurModule;
+        CurModule = gi.Module;
+        for (auto& f : inst->Fields) {
+            CollapseGenerics(f.Ty);
+            if (getenv("SYLT_DEBUG")) fprintf(stderr, "[dbg] field %s k=%d resolved=%d tyk=%d name=%s\n", f.Name.c_str(), (int)f.Ty.k, (int)f.Ty.HasResolvedTy, (int)f.Ty.ResolvedTy.K, f.Ty.Name.c_str());
+        }
+        for (auto& m : inst->Methods) {
+            for (auto& p : m->Params)
+                if (p.HasTy) CollapseGenerics(p.Ty);
+            if (m->HasRet) CollapseGenerics(m->Ret);
+        }
+        for (auto& f : inst->Fields) {
+            if (seenFields.count(f.Name)) {
+                Diag d = Rep.Err("E0305", f.Sp,
+                    "el campo `" + f.Name + "` está repetido en `" + DisplayName(key) + "`");
+                Rep.Emit(d);
+                continue;
+            }
+            seenFields.insert(f.Name);
+            FieldInfo fi;
+            fi.Name = f.Name;
+            fi.Ty = ResolveType(f.Ty, false, false);
+            fi.HasDefault = f.HasDefault;
+            fi.Sp = f.Sp;
+            if (f.HasDefault && f.Default) {
+                Push();
+                CheckExpr(f.Default.get(), IsErr(fi.Ty) ? nullptr : &fi.Ty);
+                Pop();
+            }
+            Structs[key].Fields.push_back(std::move(fi));
+        }
+        for (auto& m : inst->Methods) {
+            if (ValidateMethodSig(*m)) continue;
+            if (Structs[key].Methods.count(m->Name)) {
+                Diag d = Rep.Err("E0305", m->Sp,
+                    "el método `" + m->Name + "` está repetido en `" + DisplayName(key) + "`");
+                Rep.Emit(d);
+                continue;
+            }
+            Structs[key].Methods[m->Name] = m.get();
+            PendingCheck.push_back({key, m.get()});
+        }
+        CurModule = savedMod;
+        InstDecls.push_back(std::move(inst));
+        return key;
     }
     Type ResolveType(const TypeAnn& a, bool allowBorrow, bool allowVoid) {
+        if (a.HasResolvedTy) return a.ResolvedTy;
         switch (a.k) {
             case TypeAnn::K::None:
                 return Type::Err();
@@ -320,6 +835,14 @@ public:
                 return Type::Err();
             }
             case TypeAnn::K::Ident: {
+                if (a.Name.find('[') != std::string::npos) {
+                    auto fs = Structs.find(a.Name);
+                    if (fs != Structs.end()) return Type::StructOf(a.Name);
+                    auto fe = Enums.find(a.Name);
+                    if (fe != Enums.end()) return Type::EnumOf(a.Name);
+                    Rep.Emit(UnknownName("E0303", a.Sp, "el tipo", a.Name));
+                    return Type::Err();
+                }
                 if (a.Name.find('.') != std::string::npos) {
                     size_t dot = a.Name.find('.');
                     std::string mod = a.Name.substr(0, dot);
@@ -342,11 +865,74 @@ public:
                 if (f != Structs.end()) return Type::StructOf(key);
                 auto fe = Enums.find(key);
                 if (fe != Enums.end()) return Type::EnumOf(key);
+                if (!Generics.empty()) {
+                    std::string gk = FindGenericKey(a.Name);
+                    if (!gk.empty()) {
+                        Diag d = Rep.Err("E0310", a.Sp,
+                            "el struct `" + a.Name + "` es genérico: indica sus tipos entre corchetes");
+                        d.Helps.push_back("ejemplo: " + a.Name + "[int]");
+                        Rep.Emit(d);
+                        return Type::Err();
+                    }
+                }
                 Diag d = UnknownName("E0303", a.Sp, "el tipo", a.Name);
                 d.Helps.push_back("los tipos básicos son int, float, bool y string; "
                                   "los tuyos se definen con `type Nombre` o `enum Nombre`");
                 Rep.Emit(d);
                 return Type::Err();
+            }
+            case TypeAnn::K::Generic: {
+                std::vector<Type> args;
+                bool bad = false;
+                for (auto& s : a.Sub) {
+                    Type t = ResolveType(s, false, false);
+                    args.push_back(t);
+                    bad |= IsErr(t);
+                }
+                if (bad) return Type::Err();
+                std::string gk;
+                if (a.Name.find('.') != std::string::npos) {
+                    size_t dot = a.Name.find('.');
+                    auto mo = Mods.find(a.Name.substr(0, dot));
+                    if (mo != Mods.end()) {
+                        auto st = mo->second.Types.find(a.Name.substr(dot + 1));
+                        if (st != mo->second.Types.end()) {
+                            if (Generics.count(st->second)) gk = st->second;
+                            else {
+                                Diag d = Rep.Err("E0313", a.Sp,
+                                    "`" + a.Name + "` no es un struct genérico: no lleva argumentos de tipo");
+                                d.Helps.push_back("escribe `" + a.Name + "` sin corchetes");
+                                Rep.Emit(d);
+                                return Type::Err();
+                            }
+                        }
+                    }
+                    if (gk.empty()) {
+                        Diag d = UnknownName("E0303", a.Sp, "el tipo", a.Name);
+                        d.Helps.push_back("los tipos cualificados se escriben `modulo.Tipo` "
+                                          "tras importar el módulo");
+                        Rep.Emit(d);
+                        return Type::Err();
+                    }
+                } else {
+                    gk = FindGenericKey(a.Name);
+                    if (gk.empty()) {
+                        if (FindStruct(a.Name) || FindEnum(a.Name)) {
+                            Diag d = Rep.Err("E0313", a.Sp,
+                                "`" + a.Name + "` no es un struct genérico: no lleva argumentos de tipo");
+                            d.Helps.push_back("escribe `" + a.Name + "` sin corchetes, o revisa el nombre");
+                            Rep.Emit(d);
+                        } else {
+                            Diag d = UnknownName("E0303", a.Sp, "el tipo", a.Name);
+                            d.Helps.push_back("si es genérico, decláralo con `type " + a.Name + "[T]:`");
+                            Rep.Emit(d);
+                        }
+                        return Type::Err();
+                    }
+                }
+                std::string key = InstantiateGeneric(gk, args, a.Sp);
+                if (key.empty()) return Type::Err();
+                return Type::StructOf(key);
             }
             case TypeAnn::K::Array:
                 return Type::ArrayOf(ResolveType(a.Sub[0], false, false));
@@ -400,10 +986,19 @@ public:
         for (auto& td : Prog->Types) {
             UseModuleFile(td->Module);
             std::string key = Mangle(td->Module, td->Name);
-            if (Structs.count(key) || Fns.count(key) || Enums.count(key) || IsBuiltin(td->Name)) {
+            if (Structs.count(key) || Fns.count(key) || Enums.count(key) ||
+                Generics.count(key) || IsBuiltin(td->Name)) {
                 Diag d = Rep.Err("E0305", td->Sp, "`" + key + "` ya existe");
                 d.Helps.push_back("cada `type` y cada `fn` necesitan un nombre único");
                 Rep.Emit(d);
+                continue;
+            }
+            if (!td->TypeParams.empty()) {
+                GenericInfo gi;
+                gi.TD = td.get();
+                gi.Key = key;
+                gi.Module = td->Module;
+                Generics[key] = gi;
                 continue;
             }
             StructInfo si;
@@ -414,7 +1009,8 @@ public:
         for (auto& ed : Prog->Enums) {
             UseModuleFile(ed->Module);
             std::string key = Mangle(ed->Module, ed->Name);
-            if (Structs.count(key) || Fns.count(key) || Enums.count(key) || IsBuiltin(ed->Name)) {
+            if (Structs.count(key) || Fns.count(key) || Enums.count(key) ||
+                Generics.count(key) || IsBuiltin(ed->Name)) {
                 Diag d = Rep.Err("E0305", ed->Sp, "`" + key + "` ya existe");
                 d.Helps.push_back("cada `type`, `enum` y `fn` necesita un nombre único");
                 Rep.Emit(d);
@@ -506,7 +1102,8 @@ public:
                 Rep.Emit(d);
                 continue;
             }
-            if (Fns.count(key) || Structs.count(key) || Enums.count(key) || IsBuiltin(fd->Name)) {
+            if (Fns.count(key) || Structs.count(key) || Enums.count(key) ||
+                Generics.count(key) || IsBuiltin(fd->Name)) {
                 Diag d = Rep.Err("E0305", fd->Sp, "`" + key + "` ya existe");
                 if (IsBuiltin(fd->Name))
                     d.Msg += " (es una función integrada del lenguaje)";
@@ -554,6 +1151,11 @@ public:
                 fi.Ty = ResolveType(f.Ty, false, false);
                 fi.HasDefault = f.HasDefault;
                 fi.Sp = f.Sp;
+                if (f.HasDefault && f.Default) {
+                    Push();
+                    CheckExpr(f.Default.get(), IsErr(fi.Ty) ? nullptr : &fi.Ty);
+                    Pop();
+                }
                 si.Fields.push_back(std::move(fi));
             }
             for (auto& m : td->Methods) {
@@ -675,6 +1277,7 @@ public:
     bool RequireMain = true;
     void CheckBodies() {
         for (auto& td : Prog->Types) {
+            if (!td->TypeParams.empty()) continue;
             std::string key = Mangle(td->Module, td->Name);
             auto f = Structs.find(key);
             if (f == Structs.end()) continue;
@@ -704,8 +1307,19 @@ public:
             Diag d = Rep.ErrNoSpan("E0302", "no encuentro `fn Main()`");
             d.Helps.push_back("Main es el punto de entrada: Sylt genera el ejecutable a partir de él");
             d.Helps.push_back("si este archivo es un módulo, `syltc check` lo acepta sin Main");
+            d.Helps.push_back("si este archivo contiene pruebas, `syltc test archivo.sy` las ejecuta sin Main");
             Rep.Emit(d);
         }
+    }
+    void CheckInstantiations() {
+        CheckingInstantiation = true;
+        int guard = 0;
+        while (!PendingCheck.empty() && guard++ < 500) {
+            auto item = PendingCheck.back();
+            PendingCheck.pop_back();
+            CheckFn(item.second, &item.first);
+        }
+        PendingCheck.clear();
     }
     void CheckFn(FnDecl* fd, const std::string* owner) {
         if (fd->Foreign) return;
@@ -793,6 +1407,7 @@ public:
         CurFn = nullptr;
     }
     void WarnUnusedLocals() {
+        if (CheckingInstantiation) return;
         for (auto& sc : Scopes) {
             for (auto& kv : sc) {
                 VarInfo& v = kv.second;
@@ -888,7 +1503,7 @@ public:
                     }
                 }
                 if (valTy.IsStruct() && s->Value->K == Expr::Kind::Ident)
-                    MoveVar(s->Value.get());
+                    s->ValMoved = MoveVar(s->Value.get());
                 return;
             }
             case Stmt::Kind::Expr: {
@@ -1077,6 +1692,15 @@ public:
                 }
                 VarInfo* v = FindVar(id->Name);
                 if (!v) {
+                    std::string gk = FindGenericKey(id->Name);
+                    if (!gk.empty()) {
+                        Diag d = Rep.Err("E0310", id->Sp,
+                            "`" + id->Name + "` es un struct genérico, no un valor");
+                        d.Helps.push_back("constrúyelo con sus tipos: " + id->Name +
+                                          "[int](...)");
+                        Rep.Emit(d);
+                        return Type::Err();
+                    }
                     Rep.Emit(UnknownName("E0301", id->Sp, "la variable", id->Name));
                     return Type::Err();
                 }
@@ -1135,6 +1759,9 @@ public:
                     return Type::Err();
                 }
                 Type elem = CheckExpr(a->Elems[0].get());
+                a->ElemsMoved.assign(a->Elems.size(), false);
+                if (elem.IsStruct())
+                    a->ElemsMoved[0] = MoveVar(a->Elems[0].get());
                 for (size_t i = 1; i < a->Elems.size(); i++) {
                     Type t = CheckExpr(a->Elems[i].get(), &elem);
                     if (!IsErr(elem) && !IsErr(t) && !AssignableTo(t, elem) &&
@@ -1146,6 +1773,7 @@ public:
                         Rep.Emit(d);
                     }
                     if (elem.IsInt() && t.IsFloat()) elem = t;
+                    if (t.IsStruct()) a->ElemsMoved[i] = MoveVar(a->Elems[i].get());
                 }
                 if (IsErr(elem)) return Type::Err();
                 return Type::ArrayOf(elem);
@@ -1162,6 +1790,7 @@ public:
                 }
                 Type kt = CheckExpr(m->Pairs[0].Key.get());
                 Type vt = CheckExpr(m->Pairs[0].Val.get());
+                m->Pairs[0].ValMoved = vt.IsStruct() && MoveVar(m->Pairs[0].Val.get());
                 if (!IsErr(kt) && !kt.IsStr() && !kt.IsInt()) {
                     Diag d = Rep.Err("E0401", m->Pairs[0].Key->Sp,
                         "las claves de un mapa deben ser `string` o `int`, pero esta es `" +
@@ -1172,6 +1801,7 @@ public:
                 for (size_t i = 1; i < m->Pairs.size(); i++) {
                     Type k = CheckExpr(m->Pairs[i].Key.get(), &kt);
                     Type v = CheckExpr(m->Pairs[i].Val.get(), &vt);
+                    m->Pairs[i].ValMoved = v.IsStruct() && MoveVar(m->Pairs[i].Val.get());
                     if (!IsErr(kt) && !IsErr(k) && !AssignableTo(k, kt)) {
                         Diag d = Rep.Err("E0401", m->Pairs[i].Key->Sp,
                             "esta clave es `" + TypeName(k) + "`, pero la primera fue `" +
@@ -1398,10 +2028,22 @@ public:
     Type CheckCall(CallExpr* c) {
         if (c->Callee->K == Expr::Kind::Ident) {
             auto* id = static_cast<IdentExpr*>(c->Callee.get());
+            if (!c->TypeArgs.empty()) return CheckGenericCall(c, id->Name, id->Name);
             if (IsBuiltin(id->Name)) return CheckBuiltinCall(c, id->Name);
             if (FnDecl* fd = FindFn(id->Name)) return CheckUserCall(c, fd);
             if (StructInfo* si = FindStruct(id->Name)) return CheckStructInit(c, *si);
             if (VariantInfo* vi = FindVariant(id->Name)) return CheckEnumCtor(c, *vi);
+            {
+                std::string gk = FindGenericKey(id->Name);
+                if (!gk.empty()) {
+                    Diag d = Rep.Err("E0310", c->Callee->Sp,
+                        "el struct `" + id->Name + "` es genérico: indica sus tipos entre corchetes");
+                    d.Helps.push_back("ejemplo: " + id->Name + "[int](...)");
+                    Rep.Emit(d);
+                    for (auto& a : c->Args) CheckExpr(a.Value.get());
+                    return Type::Err();
+                }
+            }
             Rep.Emit(UnknownName("E0302", id->Sp, "la función", id->Name));
             return Type::Err();
         }
@@ -1417,6 +2059,43 @@ public:
                 }
                 auto ft = mi.Types.find(m->Name);
                 if (ft != mi.Types.end()) {
+                    bool isGen = Generics.count(ft->second) > 0;
+                    if (!c->TypeArgs.empty()) {
+                        if (isGen) {
+                            std::vector<Type> args;
+                            bool bad = false;
+                            for (auto& ta : c->TypeArgs) {
+                                Type t = ResolveType(ta, false, false);
+                                args.push_back(t);
+                                bad |= IsErr(t);
+                            }
+                            if (!bad) {
+                                std::string key = InstantiateGeneric(ft->second, args, c->Sp);
+                                if (!key.empty()) return CheckStructInit(c, Structs[key]);
+                            }
+                            for (auto& a : c->Args) CheckExpr(a.Value.get());
+                            return Type::Err();
+                        }
+                        Diag d = Rep.Err("E0313", c->Callee->Sp,
+                            "`" + mi.Name + "." + m->Name +
+                            "` no es un struct genérico: no lleva argumentos de tipo");
+                        d.Helps.push_back("escribe `" + mi.Name + "." + m->Name + "(...)` sin corchetes");
+                        Rep.Emit(d);
+                        for (auto& a : c->Args) CheckExpr(a.Value.get());
+                        return Type::Err();
+                    }
+                    if (isGen) {
+                        const auto& params = Generics[ft->second].TD->TypeParams;
+                        Diag d = Rep.Err("E0310", c->Callee->Sp,
+                            "el struct `" + mi.Name + "." + m->Name +
+                            "` es genérico: indica sus tipos entre corchetes");
+                        d.Helps.push_back("ejemplo: " + mi.Name + "." + m->Name + "[" +
+                                          (params.empty() ? std::string("int") : params[0]) +
+                                          "](...)");
+                        Rep.Emit(d);
+                        for (auto& a : c->Args) CheckExpr(a.Value.get());
+                        return Type::Err();
+                    }
                     auto st = Structs.find(ft->second);
                     if (st != Structs.end()) return CheckStructInit(c, st->second);
                 }
@@ -1499,6 +2178,57 @@ public:
             "solo se llaman funciones, métodos y structs"));
         return Type::Err();
     }
+    Type CheckGenericCall(CallExpr* c, const std::string& name, const std::string& spelling) {
+        std::string gk;
+        bool known = false;
+        if (name.find('.') != std::string::npos) {
+            size_t dot = name.find('.');
+            auto mo = Mods.find(name.substr(0, dot));
+            if (mo != Mods.end()) {
+                known = true;
+                auto st = mo->second.Types.find(name.substr(dot + 1));
+                if (st != mo->second.Types.end()) {
+                    known = true;
+                    if (Generics.count(st->second)) gk = st->second;
+                }
+            }
+        } else {
+            gk = FindGenericKey(name);
+            known = gk.empty() &&
+                    (FindStruct(name) != nullptr || FindEnum(name) != nullptr ||
+                     FindFn(name) != nullptr || IsBuiltin(name));
+        }
+        if (gk.empty()) {
+            if (!known) {
+                Rep.Emit(UnknownName("E0302", c->Callee->Sp, "la función", spelling));
+            } else {
+                Diag d = Rep.Err("E0313", c->Callee->Sp,
+                    "`" + spelling + "` no es un struct genérico: no lleva argumentos de tipo");
+                d.Helps.push_back("los corchetes con tipos solo valen en structs declarados "
+                                  "con `type Nombre[T]`");
+                Rep.Emit(d);
+            }
+            for (auto& a : c->Args) CheckExpr(a.Value.get());
+            return Type::Err();
+        }
+        std::vector<Type> args;
+        bool bad = false;
+        for (auto& ta : c->TypeArgs) {
+            Type t = ResolveType(ta, false, false);
+            args.push_back(t);
+            bad |= IsErr(t);
+        }
+        if (bad) {
+            for (auto& a : c->Args) CheckExpr(a.Value.get());
+            return Type::Err();
+        }
+        std::string key = InstantiateGeneric(gk, args, c->Callee->Sp);
+        if (key.empty()) {
+            for (auto& a : c->Args) CheckExpr(a.Value.get());
+            return Type::Err();
+        }
+        return CheckStructInit(c, Structs[key]);
+    }
     bool CheckArgCount(CallExpr* c, const std::string& name, int mn, int mx) {
         int n = (int)c->Args.size();
         if (n >= mn && n <= mx) return true;
@@ -1530,6 +2260,22 @@ public:
         c->ArgCastFloat.assign(c->Args.size(), false);
         if (name == "Print") {
             if (c->Args.size() == 1) CheckExpr(c->Args[0].Value.get());
+            return Type::Void();
+        }
+        if (name == "Afirma") {
+            Type ct = CheckExpr(c->Args[0].Value.get());
+            if (!IsErr(ct) && !ct.IsBool()) {
+                Diag d = Rep.Err("E0404", c->Args[0].Value->Sp,
+                    "Afirma necesita una condición `bool`, pero recibe `" + TypeName(ct) + "`");
+                d.Helps.push_back("ejemplo: Afirma(Doble(2) == 4, \"Doble(2) no es 4\")");
+                Rep.Emit(d);
+            }
+            Type mt = CheckExpr(c->Args[1].Value.get());
+            if (!IsErr(mt) && !mt.IsStr()) {
+                Diag d = Rep.Err("E0401", c->Args[1].Value->Sp,
+                    "el mensaje de Afirma debe ser `string`, pero es `" + TypeName(mt) + "`");
+                Rep.Emit(d);
+            }
             return Type::Void();
         }
         if (name == "Str") {
@@ -1624,6 +2370,7 @@ public:
             return ret;
         }
         c->ArgCastFloat.assign(c->Args.size(), false);
+        c->ArgMoved.assign(c->Args.size(), false);
         struct BorrowUse { std::string Var; bool Mut; Span Sp; };
         std::vector<BorrowUse> borrows;
         for (size_t i = 0; i < c->Args.size(); i++) {
@@ -1686,7 +2433,8 @@ public:
             if (!IsErr(at) && !IsErr(pty) && !AssignableTo(at, pty))
                 TypeMismatch(a.Value->Sp, pty, at);
             if (!IsErr(at) && at.IsInt() && pty.IsFloat()) c->ArgCastFloat[i] = true;
-            if (at.IsStruct() && a.Value->K == Expr::Kind::Ident) MoveVar(a.Value.get());
+            if (at.IsStruct() && a.Value->K == Expr::Kind::Ident)
+                c->ArgMoved[i] = MoveVar(a.Value.get());
         }
         for (size_t i = 0; i < borrows.size(); i++) {
             for (size_t j = i + 1; j < borrows.size(); j++) {
@@ -1814,6 +2562,7 @@ public:
             return ret;
         }
         c->ArgCastFloat.assign(c->Args.size(), false);
+        c->ArgMoved.assign(c->Args.size(), false);
         for (size_t i = 0; i < c->Args.size(); i++) {
             Arg& a = c->Args[i];
             Param* p = ps[i];
@@ -1855,7 +2604,8 @@ public:
             if (!IsErr(at) && !IsErr(pty) && !AssignableTo(at, pty))
                 TypeMismatch(a.Value->Sp, pty, at);
             if (!IsErr(at) && at.IsInt() && pty.IsFloat()) c->ArgCastFloat[i] = true;
-            if (at.IsStruct() && a.Value->K == Expr::Kind::Ident) MoveVar(a.Value.get());
+            if (at.IsStruct() && a.Value->K == Expr::Kind::Ident)
+                c->ArgMoved[i] = MoveVar(a.Value.get());
         }
         return ret;
     }
@@ -1880,6 +2630,9 @@ public:
                     TypeMismatch(c->Args[0].Value->Sp, want, vt);
                 CheckMutableTarget(m->Base.get());
                 c->ArgCastFloat.assign(1, !IsErr(want) && vt.IsInt() && want.IsFloat());
+                c->ArgMoved.assign(1, false);
+                if (!IsErr(want) && want.IsStruct())
+                    c->ArgMoved[0] = MoveVar(c->Args[0].Value.get());
                 return Type::Void();
             }
             if (n == "Pop") {
@@ -1987,8 +2740,10 @@ public:
             if (!IsErr(at) && !IsErr(want) && !AssignableTo(at, want))
                 TypeMismatch(c->Args[i].Value->Sp, want, at);
             if (!IsErr(at) && at.IsInt() && want.IsFloat()) c->ArgCastFloat[i] = true;
-            if (at.IsStruct() && c->Args[i].Value->K == Expr::Kind::Ident)
-                MoveVar(c->Args[i].Value.get());
+            if (at.IsStruct() && c->Args[i].Value->K == Expr::Kind::Ident) {
+                c->ArgMoved.assign(c->Args.size(), false);
+                c->ArgMoved[i] = MoveVar(c->Args[i].Value.get());
+            }
         }
         return et;
     }
@@ -2000,6 +2755,42 @@ public:
         }
         auto ft = mi.Types.find(m->Name);
         if (ft != mi.Types.end()) {
+            bool isGen = Generics.count(ft->second) > 0;
+            if (!c->TypeArgs.empty()) {
+                if (isGen) {
+                    std::vector<Type> args;
+                    bool bad = false;
+                    for (auto& ta : c->TypeArgs) {
+                        Type t = ResolveType(ta, false, false);
+                        args.push_back(t);
+                        bad |= IsErr(t);
+                    }
+                    if (!bad) {
+                        std::string key = InstantiateGeneric(ft->second, args, c->Sp);
+                        if (!key.empty()) return CheckStructInit(c, Structs[key]);
+                    }
+                    for (auto& a : c->Args) CheckExpr(a.Value.get());
+                    return Type::Err();
+                }
+                Diag d = Rep.Err("E0313", c->Callee->Sp,
+                    "`" + mi.Name + "." + m->Name +
+                    "` no es un struct genérico: no lleva argumentos de tipo");
+                d.Helps.push_back("escribe `" + mi.Name + "." + m->Name + " sin corchetes");
+                Rep.Emit(d);
+                for (auto& a : c->Args) CheckExpr(a.Value.get());
+                return Type::Err();
+            }
+            if (isGen) {
+                const auto& params = Generics[ft->second].TD->TypeParams;
+                Diag d = Rep.Err("E0310", c->Callee->Sp,
+                    "el struct `" + mi.Name + "." + m->Name +
+                    "` es genérico: indica sus tipos entre corchetes");
+                d.Helps.push_back("ejemplo: " + mi.Name + "." + m->Name + "[" +
+                                  (params.empty() ? std::string("int") : params[0]) + "](...)");
+                Rep.Emit(d);
+                for (auto& a : c->Args) CheckExpr(a.Value.get());
+                return Type::Err();
+            }
             auto st = Structs.find(ft->second);
             if (st != Structs.end()) return CheckStructInit(c, st->second);
         }
@@ -2208,6 +2999,11 @@ bool Check(ProgramP& prog, const SourceFile& src, Reporter& rep,
     ck.RequireMain = requireMain;
     ck.RegisterAll();
     if (rep.ErrorCount() == 0) ck.CheckBodies();
+    if (rep.ErrorCount() == 0) ck.CheckInstantiations();
+    if (rep.ErrorCount() == 0) {
+        for (auto& td : ck.InstDecls) prog->Types.push_back(std::move(td));
+        ck.InstDecls.clear();
+    }
     return rep.ErrorCount() == 0;
 }
 }

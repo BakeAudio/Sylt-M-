@@ -37,12 +37,13 @@ static bool FileExists(const std::string& P) {
 }
 static void PrintUsage() {
     std::cout <<
-        "syltc — compilador de Sylt (0.3)\n"
+        "syltc — compilador de Sylt (0.4)\n"
         "\n"
         "Uso:\n"
         "  syltc run   archivo.sy      compila en un temporal y ejecuta\n"
         "  syltc build archivo.sy      crea un ejecutable (-o para nombrarlo)\n"
         "  syltc check archivo.sy      solo comprueba (tipos + movimiento)\n"
+        "  syltc test  archivo.sy      ejecuta las pruebas Prueba* del archivo\n"
         "  syltc emit  archivo.sy      muestra el código generado (C++ o IR LLVM)\n"
         "\n"
         "Opciones:\n"
@@ -192,22 +193,25 @@ int main(int argc, char** argv) {
         PrintUsage();
         return 0;
     }
-    A.Cmd = argv[1];
-    if (A.Cmd == "--version" || A.Cmd == "-v") {
-        std::cout << "syltc 0.3.0 — compilador de Sylt\n";
-        return 0;
-    }
-    if (A.Cmd == "--help" || A.Cmd == "-h" || A.Cmd == "help") {
-        PrintUsage();
-        return 0;
-    }
-    if (A.Cmd != "run" && A.Cmd != "build" && A.Cmd != "check" && A.Cmd != "emit") {
-        std::cerr << "no sé qué hacer con `" << A.Cmd << "`\n";
-        std::cerr << "prueba: syltc run archivo.sy   (o syltc --help)\n";
-        return 2;
-    }
-    for (int i = 2; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         std::string s = argv[i];
+        if (s == "--version" || s == "-v") {
+            std::cout << "syltc 0.4.0 — compilador de Sylt\n";
+            return 0;
+        }
+        if (s == "--help" || s == "-h" || s == "help") {
+            PrintUsage();
+            return 0;
+        }
+        if (s == "run" || s == "build" || s == "check" || s == "emit" || s == "test") {
+            if (!A.Cmd.empty()) {
+                std::cerr << "solo un comando por invocación (" << A.Cmd << " y " << s
+                          << ")\n";
+                return 2;
+            }
+            A.Cmd = s;
+            continue;
+        }
         if (s == "--fast") A.Fast = true;
         else if (s == "--keep") A.Keep = true;
         else if (s == "--no-color") A.Color = false;
@@ -231,6 +235,13 @@ int main(int argc, char** argv) {
             }
             A.File = s;
         }
+    }
+    if (A.Cmd.empty()) {
+        if (!A.File.empty())
+            std::cerr << "falta el comando: prueba `syltc run " << A.File << "`\n";
+        else
+            std::cerr << "falta el comando\nprueba: syltc run archivo.sy   (o syltc --help)\n";
+        return 2;
     }
     if (A.File.empty()) {
         std::cerr << "falta el archivo .sy a compilar\n";
@@ -282,7 +293,7 @@ int main(int argc, char** argv) {
     std::unordered_map<std::string, const SourceFile*> Files;
     for (auto& U : Ld.Units)
         Files[U.Name == "__main__" ? "" : U.Name] = &U.Src;
-    Check(Prog, Src, Rep, &Files, A.Cmd != "check");
+    Check(Prog, Src, Rep, &Files, A.Cmd == "run" || A.Cmd == "build" || A.Cmd == "emit");
     if (Rep.ErrorCount() > 0) {
         std::cout << "no se pudo compilar: " << Rep.ErrorCount()
                   << (Rep.ErrorCount() == 1 ? " error, " : " errores, ")
@@ -306,6 +317,53 @@ int main(int argc, char** argv) {
     }
     GenOptions Go;
     Go.Fast = A.Fast;
+    if (A.Cmd == "test") {
+        std::vector<std::string> Tests;
+        std::vector<std::string> Malas;
+        for (auto& fd : Prog->Fns) {
+            if (!StartsWith(fd->Name, "Prueba")) continue;
+            if (fd->Module.empty() && !fd->IsMethod && !fd->Foreign && fd->Params.empty())
+                Tests.push_back(fd->Name);
+            else
+                Malas.push_back(fd->Name);
+        }
+        if (Tests.empty()) {
+            Diag d = Rep.ErrNoSpan("E0210", "no encontré ninguna prueba que ejecutar");
+            d.Helps.push_back("`syltc test` busca funciones `fn PruebaNombre()` sin "
+                              "parámetros en el archivo principal");
+            d.Helps.push_back("ejemplo: fn PruebaSuma(): Afirma(2 + 2 == 4, \"la suma falla\")");
+            Rep.Emit(d);
+            std::cout << "no se pudo compilar: " << Rep.ErrorCount() << " error\n";
+            return 1;
+        }
+        for (auto& n : Malas) {
+            for (auto& fd : Prog->Fns) {
+                if (fd->Name != n) continue;
+                Diag d = Rep.Err("E0211", fd->Sp,
+                    "la prueba `" + n + "` no se puede ejecutar");
+                if (fd->IsMethod)
+                    d.Helps.push_back("las pruebas son funciones globales, no métodos");
+                else if (!fd->Params.empty())
+                    d.Helps.push_back("las pruebas no reciben parámetros: `fn " + n + "()`");
+                else
+                    d.Helps.push_back("las pruebas viven en el archivo principal, no en un módulo");
+                Rep.Emit(d);
+            }
+        }
+        if (!Malas.empty()) {
+            std::cout << "no se pudo compilar: " << Rep.ErrorCount()
+                      << (Rep.ErrorCount() == 1 ? " error\n" : " errores\n");
+            return 1;
+        }
+        if (A.Backend == "llvm") {
+            Diag d = Rep.ErrNoSpan("E0901", "sylt test con --backend=llvm llega en la v0.4.1");
+            d.Helps.push_back("por ahora las pruebas usan el backend cpp (el de por defecto)");
+            Rep.Emit(d);
+            std::cout << "no se pudo compilar: 1 error\n";
+            return 1;
+        }
+        Go.TestFns = Tests;
+    }
     std::string Code;
     if (A.Backend == "llvm") {
         try {
@@ -317,7 +375,7 @@ int main(int argc, char** argv) {
             Diag d = Rep.Err("E0901", sp, U.Msg);
             d.Helps.push_back(
                 "el backend llvm cubre el núcleo (números, strings, structs, enums, "
-                "control de flujo); las colecciones y std.* llegan en v0.4");
+                "control de flujo); las colecciones y std.* llegan en v0.4.1");
             d.Helps.push_back("usa --backend=cpp para compilar este programa completo");
             Rep.Emit(d);
             std::cout << "no se pudo compilar: " << Rep.ErrorCount()
@@ -355,7 +413,7 @@ int main(int argc, char** argv) {
         PreludeDir = (S == std::string::npos) ? "." : Prelude.substr(0, S);
     }
     std::string TmpDir;
-    if (A.Cmd == "run" || A.Keep) {
+    if (A.Cmd == "run" || A.Cmd == "test" || A.Keep) {
         std::string Tpl = "/tmp/sylt-XXXXXX";
         std::vector<char> Buf(Tpl.begin(), Tpl.end());
         Buf.push_back(0);
@@ -391,11 +449,11 @@ int main(int argc, char** argv) {
             return 2;
         }
         Cmd = A.Cc + " " + A.Opt + " -w \"" + CppPath + "\" -o \"" +
-              (A.Cmd == "run" ? TmpDir + "/prog" : Out) + "\" -lm";
+              (A.Cmd == "run" || A.Cmd == "test" ? TmpDir + "/prog" : Out) + "\" -lm";
     } else {
         Cmd = A.Cc + " -std=c++17 " + A.Opt + " -w -I\"" + PreludeDir +
               "\" \"" + CppPath + "\" -o \"" +
-              (A.Cmd == "run" ? TmpDir + "/prog" : Out) + "\"";
+              (A.Cmd == "run" || A.Cmd == "test" ? TmpDir + "/prog" : Out) + "\"";
     }
     if (getenv("SYLT_VERBOSE")) std::cerr << "[syltc] " << Cmd << "\n";
     int Rc = std::system(Cmd.c_str());

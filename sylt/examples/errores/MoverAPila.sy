@@ -1,0 +1,9 @@
+type Nodo:
+    Id: int = 0
+    Nombre: string = ""
+
+fn Main():
+    var Pila: [Nodo] = []
+    var A = Nodo(Id: 1, Nombre: "uno")
+    Pila.Push(A)
+    Print("{A.Nombre}")

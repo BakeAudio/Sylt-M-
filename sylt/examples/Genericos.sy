@@ -1,0 +1,55 @@
+type Caja[T]:
+    Valor: T
+
+    fn Obtener(self) -> T:
+        return self.Valor
+
+    fn Vacia(self) -> bool:
+        return false
+
+type Par[A, B]:
+    Uno: A
+    Dos: B
+
+type Pila[T]:
+    Items: [T] = []
+    N: int = 0
+
+    fn Apila(mut self, V: T):
+        self.Items.Push(V)
+        self.N += 1
+
+    fn Cima(self) -> T:
+        return self.Items[self.N - 1]
+
+    fn Tamano(self) -> int:
+        return self.N
+
+fn Main():
+    let C = Caja[int](Valor: 42)
+    let S = Caja[string](Valor: "texto")
+    Print("caja de enteros: {C.Obtener()}")
+    Print("caja de textos: {S.Obtener()}")
+
+    let P = Par[string, int](Uno: "edad", Dos: 31)
+    Print("{P.Uno}: {P.Dos}")
+
+    var Enteros = Pila[int]()
+    Enteros.Apila(10)
+    Enteros.Apila(20)
+    Print("pila de enteros: tamano {Enteros.Tamano()}, cima {Enteros.Cima()}")
+
+    var Nombres = Pila[string]()
+    Nombres.Apila("Ada")
+    Nombres.Apila("Alan")
+    Print("pila de textos: cima {Nombres.Cima()}")
+
+    var Cajas = Pila[Caja[int]]()
+    Cajas.Apila(Caja[int](Valor: 99))
+    Print("genéricos anidados: {Cajas.Cima().Obtener()}")
+
+    var Tabla: [Par[string, int]] = []
+    Tabla.Push(Par[string, int](Uno: "uno", Dos: 1))
+    Tabla.Push(Par[string, int](Uno: "dos", Dos: 2))
+    for Parcial in Tabla:
+        Print("  {Parcial.Uno} -> {Parcial.Dos}")

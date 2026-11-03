@@ -42,6 +42,7 @@ public:
         O << s << "\n";
     }
     Type TypeOf(const TypeAnn& a) {
+        if (a.HasResolvedTy) return a.ResolvedTy;
         switch (a.k) {
             case TypeAnn::K::None: return Type::Err();
             case TypeAnn::K::Prim:
@@ -70,6 +71,7 @@ public:
                 return Type::TupleOf(std::move(ms));
             }
             case TypeAnn::K::Borrow: return Type::BorrowOf(TypeOf(a.Sub[0]), a.Mut);
+            case TypeAnn::K::Generic: return Type::Err();
         }
         return Type::Err();
     }
@@ -91,8 +93,8 @@ public:
                 }
                 return s + ">";
             }
-            case TK::Struct: return t.Name;
-            case TK::Enum: return t.Name;
+            case TK::Struct: return CppId(t.Name);
+            case TK::Enum: return CppId(t.Name);
             case TK::Borrow: return CppType(t.Pointee());
             default: return "int64_t";
         }
@@ -143,7 +145,10 @@ public:
         EmitMain();
     }
     void EmitForwardDecls() {
-        for (auto& td : Prog->Types) L("struct " + Key(td->Module, td->Name) + ";");
+        for (auto& td : Prog->Types) {
+            if (!td->TypeParams.empty()) continue;
+            L("struct " + CppId(Key(td->Module, td->Name)) + ";");
+        }
         if (!Prog->Types.empty()) L("");
     }
     struct DepNode {
@@ -156,6 +161,7 @@ public:
     void EmitTypesInOrder() {
         std::unordered_map<std::string, DepNode> nodes;
         for (auto& td : Prog->Types) {
+            if (!td->TypeParams.empty()) continue;
             DepNode n;
             n.Name = Key(td->Module, td->Name);
             n.TD = td.get();
@@ -198,7 +204,8 @@ public:
     }
     void EmitStruct(TypeDecl& td, const std::string& key) {
         CurModule = td.Module;
-        std::string s = "struct " + key + " {";
+        std::string cid = CppId(key);
+        std::string s = "struct " + cid + " {";
         bool multiline = !td.Fields.empty() || !td.Methods.empty();
         if (multiline) { O << s << "\n"; Ind++; }
         else L(s);
@@ -214,7 +221,8 @@ public:
     }
     void EmitEnum(EnumDecl& ed, const std::string& key) {
         CurModule = ed.Module;
-        L("struct " + key + " {");
+        std::string cid = CppId(key);
+        L("struct " + cid + " {");
         Ind++;
         L("int64_t SyltTag = 0;");
         std::vector<std::string> fieldOrder;
@@ -230,7 +238,7 @@ public:
         if (!ed.Variants.empty()) L("");
         for (size_t vi = 0; vi < ed.Variants.size(); vi++) {
             EnumVariant& v = ed.Variants[vi];
-            std::string sig = "static " + key + " " + v.Name + "(";
+            std::string sig = "static " + cid + " " + v.Name + "(";
             bool first = true;
             for (auto& f : v.Fields) {
                 if (!first) sig += ", ";
@@ -239,7 +247,7 @@ public:
             }
             L(sig + ") {");
             Ind++;
-            L(key + " V;");
+            L(cid + " V;");
             L("V.SyltTag = " + std::to_string(vi) + ";");
             for (auto& f : v.Fields) L("V.f_" + f.Name + " = std::move(" + f.Name + ");");
             L("return V;");
@@ -268,7 +276,8 @@ public:
     }
     void EmitStructMethods() {
         for (auto& td : Prog->Types) {
-            std::string key = Key(td->Module, td->Name);
+            if (!td->TypeParams.empty()) continue;
+            std::string key = CppId(Key(td->Module, td->Name));
             CurModule = td->Module;
             for (auto& m : td->Methods) {
                 bool selfMut = !m->Params.empty() && m->Params[0].IsSelf && m->Params[0].Mut;
@@ -299,7 +308,8 @@ public:
     }
     void EmitStrOverloads() {
         for (auto& td : Prog->Types) {
-            std::string key = Key(td->Module, td->Name);
+            if (!td->TypeParams.empty()) continue;
+            std::string key = CppId(Key(td->Module, td->Name));
             CurModule = td->Module;
             std::string expr =
                 "std::string(\"" + EscapeCppString(td->Name + "{") + "\")";
@@ -318,7 +328,7 @@ public:
             CurModule = "";
         }
         for (auto& ed : Prog->Enums) {
-            std::string key = Key(ed->Module, ed->Name);
+            std::string key = CppId(Key(ed->Module, ed->Name));
             L("inline std::string SyltStr(const " + key + "& V) {");
             Ind++;
             for (size_t vi = 0; vi < ed->Variants.size(); vi++) {
@@ -403,6 +413,10 @@ public:
         }
     }
     void EmitMain() {
+        if (!Opt.TestFns.empty()) {
+            EmitTestMain();
+            return;
+        }
         auto f = FnByName.find("Main");
         if (f == FnByName.end()) return;
         L("static void SyltUserMain() {");
@@ -415,6 +429,36 @@ public:
         Ind++;
         L("SyltUserMain();");
         L("return 0;");
+        Ind--;
+        L("}");
+    }
+    void EmitTestMain() {
+        L("int main() {");
+        Ind++;
+        L("int SyltFallos = 0;");
+        L("(void)SyltFallos;");
+        for (auto& t : Opt.TestFns) {
+            L("{");
+            Ind++;
+            L("try {");
+            Ind++;
+            L(t + "();");
+            L("std::cout << \"ok " + t + "\" << std::endl;");
+            Ind--;
+            L("} catch (const SyltPruebaFallo& e) {");
+            Ind++;
+            L("++SyltFallos;");
+            L("std::cout << \"fallo: " + t +
+              " (línea \" << e.Linea << \"): \" << e.Mensaje << std::endl;");
+            Ind--;
+            L("}");
+            Ind--;
+            L("}");
+        }
+        L("std::cout << " + std::to_string(Opt.TestFns.size()) +
+          " << \" pruebas, \" << SyltFallos");
+        L("          << (SyltFallos == 1 ? \" fallo\" : \" fallos\") << std::endl;");
+        L("return SyltFallos > 0 ? 1 : 0;");
         Ind--;
         L("}");
     }
@@ -451,6 +495,7 @@ public:
             case Stmt::Kind::Assign: {
                 auto* s = static_cast<AssignStmt*>(st);
                 std::string value = GenExpr(s->Value.get());
+                if (s->ValMoved) value = "std::move(" + value + ")";
                 Expr* t = s->Target.get();
                 if (t->K == Expr::Kind::Ident) {
                     auto* id = static_cast<IdentExpr*>(t);
@@ -693,10 +738,13 @@ public:
                 std::string elem = a->Ty.IsArray() ? CppType(a->Ty.Sub[0]) : "int64_t";
                 std::string s = "std::vector<" + elem + ">{";
                 bool first = true;
-                for (auto& el : a->Elems) {
+                for (size_t i = 0; i < a->Elems.size(); i++) {
                     if (!first) s += ", ";
                     first = false;
-                    s += Cast(GenExpr(el.get()), el->Ty, a->Ty.Sub[0]);
+                    std::string code = GenExpr(a->Elems[i].get());
+                    if (i < a->ElemsMoved.size() && a->ElemsMoved[i])
+                        code = "std::move(" + code + ")";
+                    s += Cast(code, a->Elems[i]->Ty, a->Ty.Sub[0]);
                 }
                 return s + "}";
             }
@@ -706,11 +754,14 @@ public:
                 std::string v = m->Ty.IsMap() ? CppType(m->Ty.Sub[1]) : "int64_t";
                 std::string s = "std::unordered_map<" + k + ", " + v + ">{";
                 bool first = true;
-                for (auto& p : m->Pairs) {
+                for (size_t i = 0; i < m->Pairs.size(); i++) {
                     if (!first) s += ", ";
                     first = false;
-                    s += "{" + Cast(GenExpr(p.Key.get()), p.Key->Ty, m->Ty.Sub[0]) + ", " +
-                         Cast(GenExpr(p.Val.get()), p.Val->Ty, m->Ty.Sub[1]) + "}";
+                    std::string vcode = GenExpr(m->Pairs[i].Val.get());
+                    if (m->Pairs[i].ValMoved) vcode = "std::move(" + vcode + ")";
+                    s += "{" + Cast(GenExpr(m->Pairs[i].Key.get()), m->Pairs[i].Key->Ty,
+                                     m->Ty.Sub[0]) + ", " +
+                         Cast(vcode, m->Pairs[i].Val->Ty, m->Ty.Sub[1]) + "}";
                 }
                 return s + "}";
             }
@@ -734,6 +785,12 @@ public:
             return "(double)(" + code + ")";
         return code;
     }
+    std::string MovedArg(CallExpr* c, size_t i) {
+        std::string code = ArgCode(c, i);
+        if (i < c->ArgMoved.size() && c->ArgMoved[i])
+            code = "std::move(" + code + ")";
+        return code;
+    }
     std::string GenCall(CallExpr* c) {
         switch (c->Resolved) {
             case CallExpr::Target::Builtin: {
@@ -748,13 +805,16 @@ public:
                 if (n == "Min") return "SyltMin(" + ArgCode(c, 0) + ", " + ArgCode(c, 1) + ")";
                 if (n == "Max") return "SyltMax(" + ArgCode(c, 0) + ", " + ArgCode(c, 1) + ")";
                 if (n == "Pow") return "SyltPow(" + ArgCode(c, 0) + ", " + ArgCode(c, 1) + ")";
+                if (n == "Afirma")
+                    return "SyAfirma(" + ArgCode(c, 0) + ", " + ArgCode(c, 1) + ", " +
+                           std::to_string(c->Sp.Line) + ")";
                 return "0";
             }
             case CallExpr::Target::Fn: {
                 std::string s = c->TargetName + "(";
                 for (size_t i = 0; i < c->Args.size(); i++) {
                     if (i) s += ", ";
-                    s += ArgCode(c, i);
+                    s += MovedArg(c, i);
                 }
                 return s + ")";
             }
@@ -762,13 +822,13 @@ public:
                 std::string s = c->TargetName + "::" + c->VariantName + "(";
                 for (size_t i = 0; i < c->Args.size(); i++) {
                     if (i) s += ", ";
-                    s += ArgCode(c, i);
+                    s += MovedArg(c, i);
                 }
                 return s + ")";
             }
             case CallExpr::Target::StructInit: {
                 auto it = TypeByName.find(c->TargetName);
-                if (it == TypeByName.end()) return c->TargetName + "{}";
+                if (it == TypeByName.end()) return CppId(c->TargetName) + "{}";
                 TypeDecl* td = it->second;
                 bool named = !c->Args.empty() && !c->Args[0].Name.empty();
                 std::vector<std::string> vals(td->Fields.size(), "");
@@ -789,7 +849,14 @@ public:
                     }
                 }
                 CurModule = "";
-                std::string s = c->TargetName + "{";
+                for (size_t i = 0; i < vals.size(); i++) {
+                    if (vals[i].empty() && td->Fields[i].HasDefault && td->Fields[i].Default) {
+                        CurModule = td->Module;
+                        vals[i] = GenExpr(td->Fields[i].Default.get());
+                        CurModule = "";
+                    }
+                }
+                std::string s = CppId(c->TargetName) + "{";
                 bool first = true;
                 for (auto& v : vals) {
                     if (!first) s += ", ";
@@ -806,7 +873,7 @@ public:
                     Type bt = m->Base->Ty.Pointee();
                     if (bt.IsArray() || bt.IsMap() || bt.IsStr()) {
                         if (n == "Push")
-                            return "SyltPush(" + base + ", " + ArgCode(c, 0) + ")";
+                            return "SyltPush(" + base + ", " + MovedArg(c, 0) + ")";
                         if (n == "Pop") return "SyltPop(" + base + ")";
                         if (n == "Len") return "((int64_t)(" + base + ").size())";
                         if (n == "Claves") return "SyltClaves(" + base + ")";
@@ -822,7 +889,7 @@ public:
                 std::string s = "(" + base + ")." + n + "(";
                 for (size_t i = 0; i < c->Args.size(); i++) {
                     if (i) s += ", ";
-                    s += ArgCode(c, i);
+                    s += MovedArg(c, i);
                 }
                 return s + ")";
             }

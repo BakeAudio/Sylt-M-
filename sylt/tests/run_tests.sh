@@ -16,7 +16,7 @@ decir_fallo() {
 }
 
 echo "== ejemplos que deben funcionar =="
-for EJ in Hola Fib Figuras Colecciones Prestamos Estados Modulos Externo; do
+for EJ in Hola Fib Figuras Colecciones Prestamos Estados Modulos Externo Genericos; do
     if $SYLTC run "examples/$EJ.sy" > /tmp/sylt_test_out.txt 2>&1; then
         decir_ok "$EJ.sy"
     else
@@ -37,6 +37,9 @@ declare -A ESPERADO=(
     [VarianteErronea]=E0602
     [ModuloFantasma]=E0701
     [ExternoInvalido]=E0801
+    [GenericoSinTipos]=E0310
+    [GenericoAridad]=E0311
+    [MoverAPila]=E0501
 )
 for EJ in "${!ESPERADO[@]}"; do
     SALIDA=$($SYLTC check "examples/errores/$EJ.sy" 2>&1)
@@ -49,6 +52,31 @@ for EJ in "${!ESPERADO[@]}"; do
         echo "$SALIDA" | head -8
     fi
 done
+
+echo "== sylt test: pruebas integradas =="
+SALIDA=$($SYLTC test examples/Pruebas.sy 2>&1)
+COD=$?
+if [ $COD -eq 0 ] && echo "$SALIDA" | grep -q "4 pruebas, 0 fallos" && [ $(echo "$SALIDA" | grep -c '^ok ') -eq 4 ]; then
+    decir_ok "Pruebas.sy: 4 pruebas, 0 fallos"
+else
+    decir_fallo "Pruebas.sy debería pasar 4 pruebas"
+    echo "$SALIDA" | head -8
+fi
+SALIDA=$($SYLTC test examples/PruebasFallan.sy 2>&1)
+COD=$?
+if [ $COD -eq 1 ] && echo "$SALIDA" | grep -q "fallo: PruebaSumaMal" && echo "$SALIDA" | grep -q "2 pruebas, 1 fallo"; then
+    decir_ok "PruebasFallan.sy: informa el fallo y sale con 1"
+else
+    decir_fallo "PruebasFallan.sy debería fallar con informe (exit 1)"
+    echo "$SALIDA" | head -8
+fi
+SALIDA=$($SYLTC test examples/Hola.sy 2>&1)
+if echo "$SALIDA" | grep -q "E0210"; then
+    decir_ok "test sin pruebas Prueba* reporta E0210"
+else
+    decir_fallo "test sobre Hola.sy debería reportar E0210"
+    echo "$SALIDA" | head -8
+fi
 
 echo "== módulos: check los acepta, run exige Main =="
 SALIDA=$($SYLTC check examples/matematicas.sy 2>&1)

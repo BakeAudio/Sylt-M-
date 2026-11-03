@@ -76,6 +76,13 @@ struct Parser {
                 a.Name += "." + Cur().Text;
             }
             Advance();
+            if (Is(TT::LBracket)) {
+                Advance();
+                a.k = TypeAnn::K::Generic;
+                a.Sub.push_back(ParseTypeAnnBase(false));
+                while (Accept(TT::Comma)) a.Sub.push_back(ParseTypeAnnBase(false));
+                Expect(TT::RBracket, "`]` que cierra los argumentos de tipo");
+            }
             return a;
         }
         if (Accept(TT::LBracket)) {
@@ -210,6 +217,23 @@ struct Parser {
         const Token& nt = Expect(TT::Ident, "el nombre del struct");
         td->Name = nt.Text;
         td->Sp = nt.Sp;
+        if (Accept(TT::LBracket)) {
+            while (true) {
+                const Token& p = Expect(TT::Ident,
+                    "el nombre del parámetro de tipo (T, U...)");
+                bool dup = false;
+                for (auto& q : td->TypeParams) dup |= (q == p.Text);
+                if (dup) {
+                    Diag d = Rep.Err("E0305", p.Sp,
+                        "el parámetro de tipo `" + p.Text + "` está repetido");
+                    Rep.Emit(d);
+                } else {
+                    td->TypeParams.push_back(p.Text);
+                }
+                if (!Accept(TT::Comma)) break;
+            }
+            Expect(TT::RBracket, "`]` que cierra los parámetros de tipo");
+        }
         Expect(TT::Colon, "`:` para abrir el cuerpo del struct");
         Expect(TT::Newline, "un salto de línea (el cuerpo va con sangría)");
         if (!Accept(TT::Indent)) {
@@ -249,6 +273,15 @@ struct Parser {
         const Token& nt = Expect(TT::Ident, "el nombre del enum");
         ed->Name = nt.Text;
         ed->Sp = nt.Sp;
+        if (Is(TT::LBracket)) {
+            Span sp = Cur().Sp;
+            while (!IsEof() && !Is(TT::Colon) && !Is(TT::Newline)) Advance();
+            Diag d = Rep.Err("E0314", sp,
+                "los enums genéricos no están soportados (los structs sí: type Caja[T])");
+            d.Helps.push_back("si cada variante necesita su propio tipo, "
+                              "declara un enum por tipo, o usa un struct genérico con un enum dentro");
+            Rep.Emit(d);
+        }
         Expect(TT::Colon, "`:` para abrir el cuerpo del enum");
         Expect(TT::Newline, "un salto de línea (el cuerpo va con sangría)");
         if (!Accept(TT::Indent)) {
@@ -731,11 +764,21 @@ struct Parser {
     ExprP ParsePostfix() {
         ExprP e = ParsePrimary();
         if (!e) return nullptr;
+        std::vector<TypeAnn> TypeArgsPending;
         while (true) {
+            if (Is(TT::LBracket) && IsTypePath(e.get()) && ScanTypeArgsAhead()) {
+                Advance();
+                TypeArgsPending.push_back(ParseTypeAnnBase(false));
+                while (Accept(TT::Comma)) TypeArgsPending.push_back(ParseTypeAnnBase(false));
+                Expect(TT::RBracket, "`]` que cierra los argumentos de tipo");
+                continue;
+            }
             if (Is(TT::LParen)) {
                 auto c = std::make_unique<CallExpr>();
                 c->Sp = Cur().Sp;
                 c->Callee = std::move(e);
+                c->TypeArgs = std::move(TypeArgsPending);
+                TypeArgsPending.clear();
                 c->Args = ParseArgs();
                 c->Sp.Len = (int)(Cur().Sp.Col - c->Sp.Col) + 1;
                 e = std::move(c);
@@ -761,6 +804,66 @@ struct Parser {
             }
         }
         return e;
+    }
+    static bool IsTypePath(const Expr* e) {
+        if (e->K == Expr::Kind::Ident) return true;
+        if (e->K == Expr::Kind::Member)
+            return IsTypePath(static_cast<const MemberExpr*>(e)->Base.get());
+        return false;
+    }
+    bool ScanTypeAnnAhead() {
+        if (Is(TT::Ident)) {
+            Advance();
+            if (Is(TT::Dot) && Peek().T == TT::Ident) {
+                Advance();
+                Advance();
+            }
+            if (Is(TT::LBracket)) {
+                Advance();
+                if (!ScanTypeAnnAhead()) return false;
+                while (Accept(TT::Comma)) {
+                    if (!ScanTypeAnnAhead()) return false;
+                }
+                if (!Is(TT::RBracket)) return false;
+                Advance();
+            }
+            return true;
+        }
+        if (Is(TT::LBracket)) {
+            Advance();
+            if (!ScanTypeAnnAhead()) return false;
+            if (!Is(TT::RBracket)) return false;
+            Advance();
+            return true;
+        }
+        if (Is(TT::LBrace)) {
+            Advance();
+            if (!ScanTypeAnnAhead()) return false;
+            if (!Is(TT::Colon)) return false;
+            Advance();
+            if (!ScanTypeAnnAhead()) return false;
+            if (!Is(TT::RBrace)) return false;
+            Advance();
+            return true;
+        }
+        return false;
+    }
+    bool ScanTypeArgsAhead() {
+        size_t save = I;
+        bool ok = false;
+        if (Is(TT::LBracket)) {
+            Advance();
+            ok = ScanTypeAnnAhead();
+            while (ok && Accept(TT::Comma)) ok = ScanTypeAnnAhead();
+            if (ok && Is(TT::RBracket)) {
+                Advance();
+                ok = Is(TT::LParen);
+            } else {
+                ok = false;
+            }
+        }
+        I = save;
+        return ok;
     }
     std::vector<Arg> ParseArgs() {
         std::vector<Arg> args;

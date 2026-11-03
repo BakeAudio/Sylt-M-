@@ -67,6 +67,7 @@ public:
     }
 
     Type TypeOf(const TypeAnn& a) {
+        if (a.HasResolvedTy) return a.ResolvedTy;
         switch (a.k) {
             case TypeAnn::K::None: return Type::Err();
             case TypeAnn::K::Prim:
@@ -77,6 +78,11 @@ public:
                 if (a.Name == "void") return Type::Void();
                 return Type::Err();
             case TypeAnn::K::Ident: {
+                if (a.Name.find('[') != std::string::npos) {
+                    if (TypeByName.count(a.Name) || EnumByName.count(a.Name))
+                        return Type::StructOf(a.Name);
+                    return Type::Err();
+                }
                 if (a.Name.find('.') != std::string::npos) {
                     auto it = QualNames.find(a.Name);
                     return Type::StructOf(it != QualNames.end() ? it->second : a.Name);
@@ -95,6 +101,7 @@ public:
                 return Type::TupleOf(std::move(ms));
             }
             case TypeAnn::K::Borrow: return Type::BorrowOf(TypeOf(a.Sub[0]), a.Mut);
+            case TypeAnn::K::Generic: return Type::Err();
         }
         return Type::Err();
     }
@@ -106,8 +113,8 @@ public:
             case TK::Bool: return "i1";
             case TK::Str: return "ptr";
             case TK::Void: return "void";
-            case TK::Struct: return "%" + t.Name;
-            case TK::Enum: return "%" + t.Name;
+            case TK::Struct: return "%" + CppId(t.Name);
+            case TK::Enum: return "%" + CppId(t.Name);
             case TK::Borrow: return LT(t.Pointee(), sp);
             case TK::Array:
                 throw Unsupported{sp, "los arrays no están soportados todavía por el backend llvm"};
@@ -214,10 +221,11 @@ public:
         else if (t.IsFloat()) I(r + " = call ptr @sylt.f64_str(double " + reg + ")");
         else if (t.IsBool()) I(r + " = call ptr @sylt.bool_str(i1 " + reg + ")");
         else if (t.IsStruct() || t.IsEnum()) {
+            std::string tid = CppId(t.Name);
             std::string tmp = N();
-            I(tmp + " = alloca %" + t.Name);
-            I("store %" + t.Name + " " + reg + ", ptr " + tmp);
-            I(r + " = call ptr @sylt.str_of__" + t.Name + "(ptr " + tmp + ")");
+            I(tmp + " = alloca %" + tid);
+            I("store %" + tid + " " + reg + ", ptr " + tmp);
+            I(r + " = call ptr @sylt.str_of__" + tid + "(ptr " + tmp + ")");
         } else throw Unsupported{Span(), "no puedo convertir este valor a texto en el backend llvm"};
         return r;
     }
@@ -245,7 +253,7 @@ public:
                 throw Unsupported{m->Sp, "tipo desconocido en el backend llvm"};
             int idx = FieldIndex(f->second, m->Name);
             std::string r = N();
-            I(r + " = getelementptr inbounds %" + bt.Name + ", ptr " + b.Ptr +
+            I(r + " = getelementptr inbounds %" + CppId(bt.Name) + ", ptr " + b.Ptr +
               ", i32 0, i32 " + std::to_string(idx));
             return {r, m->Ty};
         }
@@ -386,15 +394,16 @@ public:
                     if (ed == EnumByName.end())
                         throw Unsupported{m->Sp, "enum desconocido en el backend llvm"};
                     int vi = VariantIndex(ed->second, m->Name);
+                    std::string eid = CppId(m->EnumKey);
                     std::string t = N();
-                    I(t + " = alloca %" + m->EnumKey);
-                    I("store %" + m->EnumKey + " zeroinitializer, ptr " + t);
+                    I(t + " = alloca %" + eid);
+                    I("store %" + eid + " zeroinitializer, ptr " + t);
                     std::string tp = N();
-                    I(tp + " = getelementptr inbounds %" + m->EnumKey + ", ptr " + t +
+                    I(tp + " = getelementptr inbounds %" + eid + ", ptr " + t +
                       ", i32 0, i32 0");
                     I("store i64 " + std::to_string(vi) + ", ptr " + tp);
                     std::string r = N();
-                    I(r + " = load %" + m->EnumKey + ", ptr " + t);
+                    I(r + " = load %" + eid + ", ptr " + t);
                     return {"%" + m->EnumKey, r, e->Ty};
                 }
                 LVal lv = GenLval(e);
@@ -562,6 +571,10 @@ public:
                     return {"i64", out, Type::Int()};
                 }
                 if (n == "Clone") return GenExpr(c->Args[0].Value.get());
+                if (n == "Afirma")
+                    throw Unsupported{c->Sp,
+                                      "Afirma no está soportado todavía por el backend llvm "
+                                      "(sí en --backend=cpp)"};
                 if (n == "TiempoMs")
                     throw Unsupported{c->Sp,
                                       "TiempoMs no está soportado todavía por el backend llvm"};
@@ -597,11 +610,12 @@ public:
                     throw Unsupported{c->Sp, "enum desconocido en el backend llvm"};
                 int vi = VariantIndex(ed->second, c->VariantName);
                 auto args = GenArgs(c);
+                std::string tid = CppId(c->TargetName);
                 std::string t = N();
-                I(t + " = alloca %" + c->TargetName);
-                I("store %" + c->TargetName + " zeroinitializer, ptr " + t);
+                I(t + " = alloca %" + tid);
+                I("store %" + tid + " zeroinitializer, ptr " + t);
                 std::string tp = N();
-                I(tp + " = getelementptr inbounds %" + c->TargetName + ", ptr " + t +
+                I(tp + " = getelementptr inbounds %" + tid + ", ptr " + t +
                   ", i32 0, i32 0");
                 I("store i64 " + std::to_string(vi) + ", ptr " + tp);
                 EnumVariant& v = ed->second->Variants[vi];
@@ -610,7 +624,7 @@ public:
                     Type ft = TypeOf(v.Fields[i].Ty);
                     int slot = 1 + EnumFieldPos[c->TargetName][v.Fields[i].Name];
                     std::string fp = N();
-                    I(fp + " = getelementptr inbounds %" + c->TargetName + ", ptr " + t +
+                    I(fp + " = getelementptr inbounds %" + tid + ", ptr " + t +
                       ", i32 0, i32 " + std::to_string(slot));
                     RVal val = {"", "", ft};
                     if (i < c->ArgCastFloat.size() && c->ArgCastFloat[i]) {
@@ -624,7 +638,7 @@ public:
                 }
                 CurModule = "";
                 std::string r = N();
-                I(r + " = load %" + c->TargetName + ", ptr " + t);
+                I(r + " = load %" + tid + ", ptr " + t);
                 return {"%" + c->TargetName, r, c->Ty};
             }
             case CallExpr::Target::StructInit: {
@@ -633,6 +647,7 @@ public:
                     throw Unsupported{c->Sp, "struct desconocido en el backend llvm"};
                 TypeDecl* td = it->second;
                 CurModule = td->Module;
+                std::string tid = CppId(c->TargetName);
                 bool named = !c->Args.empty() && !c->Args[0].Name.empty();
                 std::vector<std::string> vals(td->Fields.size(), "");
                 for (size_t i = 0; i < c->Args.size(); i++) {
@@ -652,12 +667,12 @@ public:
                     vals[dst] = v.V;
                 }
                 std::string t = N();
-                I(t + " = alloca %" + c->TargetName);
+                I(t + " = alloca %" + tid);
                 for (size_t i = 0; i < td->Fields.size(); i++) {
                     Type ft = TypeOf(td->Fields[i].Ty);
                     std::string lt = LT(ft, td->Fields[i].Sp);
                     std::string fp = N();
-                    I(fp + " = getelementptr inbounds %" + c->TargetName + ", ptr " + t +
+                    I(fp + " = getelementptr inbounds %" + tid + ", ptr " + t +
                       ", i32 0, i32 " + std::to_string(i));
                     if (!vals[i].empty()) {
                         I("store " + lt + " " + vals[i] + ", ptr " + fp);
@@ -684,7 +699,7 @@ public:
                                       "todavía por el backend llvm"};
                 LVal recv = GenLval(m->Base.get());
                 auto args = GenArgs(c);
-                std::string full = bt.Name + "__" + c->TargetName;
+                std::string full = CppId(bt.Name) + "__" + c->TargetName;
                 std::string ret = c->Ty.K == TK::Void ? "void" : LT(c->Ty, c->Sp);
                 std::string sig = "ptr " + recv.Ptr;
                 for (auto& a : args) sig += ", " + a.first + " " + a.second;
@@ -949,7 +964,7 @@ public:
                 Term("br i1 " + cond + ", label %" + bodyL + ", label %" + fallthrough);
             } else {
                 std::string tagp = N(), tag = N(), cond = N();
-                I(tagp + " = getelementptr inbounds %" + enumKey + ", ptr " + sp +
+                I(tagp + " = getelementptr inbounds %" + CppId(enumKey) + ", ptr " + sp +
                   ", i32 0, i32 0");
                 I(tag + " = load i64, ptr " + tagp);
                 I(cond + " = icmp eq i64 " + tag + ", " + std::to_string(arm.Pat.TagIndex));
@@ -967,7 +982,7 @@ public:
                         if (fp != ek->second.end()) pos = fp->second;
                     }
                     std::string bp = N();
-                    I(bp + " = getelementptr inbounds %" + enumKey + ", ptr " + sp +
+                    I(bp + " = getelementptr inbounds %" + CppId(enumKey) + ", ptr " + sp +
                       ", i32 0, i32 " + std::to_string(1 + pos));
                     LetBind(arm.Pat.Bindings[j], bp);
                 }
@@ -992,14 +1007,17 @@ public:
         for (auto& fd : Prog->Fns)
             if (!fd->Foreign) EmitFnDecl(*fd);
         for (auto& td : Prog->Types)
-            for (auto& m : td->Methods)
-                EmitFnDecl(*m, Key(td->Module, td->Name) + "__" + m->Name);
+            for (auto& m : td->Methods) {
+                if (!td->TypeParams.empty()) continue;
+                EmitFnDecl(*m, CppId(Key(td->Module, td->Name)) + "__" + m->Name);
+            }
         EmitMain();
     }
 
     void EmitTypes() {
         for (auto& td : Prog->Types) {
-            std::string key = Key(td->Module, td->Name);
+            if (!td->TypeParams.empty()) continue;
+            std::string key = CppId(Key(td->Module, td->Name));
             CurModule = td->Module;
             std::string s = "%" + key + " = type { ";
             for (size_t i = 0; i < td->Fields.size(); i++) {
@@ -1021,7 +1039,7 @@ public:
                     order.push_back(f.Name);
                 }
             CurModule = "";
-            std::string s = "%" + key + " = type { i64";
+            std::string s = "%" + CppId(key) + " = type { i64";
             for (size_t i = 0; i < order.size(); i++) {
                 s += ", " + LT(kinds[order[i]], ed->Sp);
                 EnumFieldPos[key][order[i]] = (int)i;
@@ -1159,7 +1177,10 @@ public:
     }
 
     void EmitStrOfProtos() {
-        for (auto& td : Prog->Types) EmitStrOfStruct(*td);
+        for (auto& td : Prog->Types) {
+            if (!td->TypeParams.empty()) continue;
+            EmitStrOfStruct(*td);
+        }
         for (auto& ed : Prog->Enums) EmitStrOfEnum(*ed);
     }
 
@@ -1168,12 +1189,12 @@ public:
         Type ft = TypeOf(f.Ty);
         std::string lt = LT(ft, f.Sp);
         std::string fp = N();
-        I(fp + " = getelementptr inbounds %" + aggKey + ", ptr " + vreg + ", i32 0, i32 " +
+        I(fp + " = getelementptr inbounds %" + CppId(aggKey) + ", ptr " + vreg + ", i32 0, i32 " +
           std::to_string(idx));
         if (ft.IsStr()) return fp;
         if (ft.IsStruct() || ft.IsEnum()) {
             std::string r = N();
-            I(r + " = call ptr @sylt.str_of__" + ft.Name + "(ptr " + fp + ")");
+            I(r + " = call ptr @sylt.str_of__" + CppId(ft.Name) + "(ptr " + fp + ")");
             return r;
         }
         std::string v = N();
@@ -1210,7 +1231,7 @@ public:
             text += Blocks[i].second;
             if (!Closed[i]) text += "  unreachable\n";
         }
-        Bs << "define private ptr @sylt.str_of__" << key << "(ptr %a0) {\n"
+        Bs << "define private ptr @sylt.str_of__" << CppId(key) << "(ptr %a0) {\n"
            << text << "}\n\n";
     }
 
@@ -1222,7 +1243,7 @@ public:
         VarPtr.clear();
         Open("");
         std::string tagp = N();
-        I(tagp + " = getelementptr inbounds %" + key + ", ptr %a0, i32 0, i32 0");
+        I(tagp + " = getelementptr inbounds %" + CppId(key) + ", ptr %a0, i32 0, i32 0");
         std::string tag = N();
         I(tag + " = load i64, ptr " + tagp);
         std::string rp = N();
@@ -1276,7 +1297,7 @@ public:
             if (!Closed[i]) text += "  unreachable\n";
         }
         (void)unk;
-        Bs << "define private ptr @sylt.str_of__" << key << "(ptr %a0) {\n"
+        Bs << "define private ptr @sylt.str_of__" << CppId(key) << "(ptr %a0) {\n"
            << text << "}\n\n";
     }
 

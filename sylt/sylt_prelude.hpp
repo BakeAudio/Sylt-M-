@@ -84,8 +84,15 @@ void SyltPrint(const T& V) {
     std::cout << SyltStr(V) << "\n";
 }
 template <class V, class T>
-void SyltPush(V& Vec, const T& Val) {
-    Vec.push_back(Val);
+void SyltPush(V& Vec, T&& Val) {
+    Vec.push_back(std::forward<T>(Val));
+}
+struct SyltPruebaFallo {
+    std::string Mensaje;
+    int Linea = 0;
+};
+inline void SyAfirma(bool Cond, const std::string& Mensaje, int Linea) {
+    if (!Cond) throw SyltPruebaFallo{Mensaje, Linea};
 }
 template <class V>
 typename V::value_type SyltPop(V& Vec) {
