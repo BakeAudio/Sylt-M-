@@ -7,7 +7,7 @@ Sylt es un lenguaje de programación compilado. Se escribe con la sintaxis por i
 - **Comprobación en compilación**: uso después de mover, préstamos conflictivos, mutación de inmutables y `match` no exhaustivo son errores, no advertencias.
 - **Acceso al ecosistema C++**: un bloque `foreign` declara funciones de cualquier cabecera C/C++ y se llaman a velocidad nativa, sin FFI.
 
-Versión actual: **0.4.0**. Requisitos: `g++` o `clang++` con soporte de C++17. Probado en Linux (x86-64). Licencia no comercial ([ver licencia](#licencia)).
+Versión actual: **0.6.0**. Requisitos: `g++` o `clang++` con soporte de C++17. Probado en Linux (x86-64). Licencia no comercial ([ver licencia](#licencia)).
 
 ---
 
