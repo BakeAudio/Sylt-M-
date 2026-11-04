@@ -5,7 +5,9 @@ Sylt es un lenguaje de programación compilado. Se escribe con la sintaxis por i
 - **Velocidad nativa**: sin máquina virtual, sin intérprete, sin recolector de basura. El binario generado compila con `g++` o `clang++` y `-O2`.
 - **Sintaxis por indentación**: bloques con sangría, sin punto y coma, strings con interpolación `"{Nombre}"`.
 - **Comprobación en compilación**: uso después de mover, préstamos conflictivos, mutación de inmutables y `match` no exhaustivo son errores, no advertencias.
+- **JSON incluido**: `std.json` parsea y serializa con un enum recursivo `JsonValor`, con errores que indican la posición exacta del problema.
 - **Acceso al ecosistema C++**: un bloque `foreign` declara funciones de cualquier cabecera C/C++ y se llaman a velocidad nativa, sin FFI.
+- **Herramientas del lenguaje**: formateador con estilo canónico (`syltc fmt`), servidor de lenguaje para editores (`syltc lsp`) y gestor de paquetes (`syltc pkg`), todo en el mismo binario.
 
 Versión actual: **0.6.0**. Requisitos: `g++` o `clang++` con soporte de C++17. Probado en Linux (x86-64). Licencia no comercial ([ver licencia](#licencia)).
 
@@ -283,6 +285,45 @@ En `examples/errores/` hay 13 archivos que no compilan a propósito, con su erro
 
 ---
 
+## Herramientas
+
+### Formateo: syltc fmt
+
+```bash
+syltc fmt archivo.sy          # formatea en el sitio
+syltc fmt src/                # todos los .sy de una carpeta, recursivamente
+syltc fmt --check .           # no escribe; avisa qué cambiaría y sale con 1
+```
+
+`syltc fmt` aplica el estilo canónico del lenguaje: sangría de 4 espacios, un espacio alrededor de los operadores, `{ "clave": valor }` en los mapas, `fn Nombre(...)` sin espacio antes del paréntesis y un único salto final. Conserva los comentarios en su sitio y los strings byte a byte (escapes e interpolaciones incluidos). Los saltos de línea del autor se respetan: normaliza sangría y espacios, no reenvuelve líneas.
+
+Es idempotente (formatear dos veces deja el mismo texto) y con `--check` encaja en CI para exigir estilo uniforme. Todo el repositorio ya está en el estilo canónico y la suite lo comprueba.
+
+### El servidor de lenguaje: syltc lsp
+
+```bash
+syltc lsp
+```
+
+Habla JSON-RPC 2.0 por stdin/stdout, el protocolo estándar de los editores. Al abrir o editar un archivo ejecuta el mismo lexer, parser y checker que `syltc check` y publica los errores con código, posición y ayuda; la petición de formato del editor devuelve lo que produciría `syltc fmt`.
+
+Lo que ves subrayado en el editor es exactamente lo que `syltc build` dirá: no hay un segundo checker que se desincronice. Vale cualquier cliente LSP; basta asociar `syltc lsp` a los archivos `.sy`.
+
+### Paquetes: syltc pkg
+
+Un paquete es una carpeta con un módulo principal `nombre.sy` y los módulos que necesite junto a él. Se instala en el registro local (`~/.local/share/sylt/pkg/`) desde una carpeta o desde git:
+
+```bash
+syltc pkg add ./mi-paquete                               # carpeta local
+syltc pkg add https://github.com/usuario/paquete         # clona e instala
+syltc pkg list                                           # qué hay instalado
+syltc pkg remove paquete                                 # desinstala
+```
+
+Tras instalarlo, `import nombre` lo encuentra igual que un módulo local: primero junto al archivo que importa, después en el registro. Cada instalación deja origen y versión anotados en `<nombre>.meta`. La ruta del registro se cambia con `--pkg=RUTA` o la variable `SYLT_PKG`, útil para registros aislados por proyecto.
+
+---
+
 ## Rendimiento
 
 `examples/BenchJuego.sy` simula un game loop de 2.000 entidades durante 120 frames y mide con `TiempoMs()`:
@@ -322,7 +363,7 @@ Con `syltc emit archivo.sy` se puede ver el C++ generado, y con `--backend=llvm`
 
 ## Biblioteca estándar
 
-La biblioteca estándar está escrita en Sylt y se apoya en 26 primitivas `sy_*` del runtime (`sylt_prelude.hpp`). Se importa por módulos:
+La biblioteca estándar está escrita en Sylt y se apoya en 29 primitivas `sy_*` del runtime (`sylt_prelude.hpp`). Se importa por módulos:
 
 | Módulo | Contenido |
 |---|---|
@@ -331,8 +372,10 @@ La biblioteca estándar está escrita en Sylt y se apoya en 26 primitivas `sy_*`
 | `std.time` | `AhoraMs` (reloj de pared), `MonoMs` (monótono) |
 | `std.net` | TCP: `TcpConectar`, `TcpEnviar`, `TcpRecibir`, `TcpEscuchar`, `TcpAceptar` |
 | `std.http` | `Get(url) -> (codigo, cuerpo)`, escrito en Sylt sobre `std.net` y `std.str` |
+| `std.hilo` | `Lanzar(fn) -> id`, `Esperar(id)`, `Dormir(ms)`: hilos reales del sistema |
+| `std.json` | `Parse(t) -> (ok, error, JsonValor)`, `Texto(v)`, `DeArchivo`, `HaciaArchivo`; enum recursivo `JsonValor` con `Nulo`, `Logico`, `Numero`, `Texto`, `Lista`, `Objeto` |
 
-`examples/ServidorHttp.sy` es un servidor HTTP con rutas, cabeceras y 404 en unas 60 líneas de Sylt; la suite lo compila, lo levanta y le hace peticiones reales.
+`examples/ServidorHttp.sy` es un servidor HTTP con rutas, cabeceras, 404 y keep-alive (varias peticiones por conexión) en unas 70 líneas de Sylt; la suite lo compila, lo levanta, le hace peticiones reales y comprueba que curl reutiliza la conexión.
 
 Para librerías externas, la vía es `foreign`: toda librería C/C++ queda a un bloque de distancia y a velocidad nativa. Las librerías propias se reparten como archivos `.sy` que se importan directamente.
 
@@ -352,7 +395,10 @@ Para librerías externas, la vía es `foreign`: toda librería C/C++ queda a un 
 | `examples/Modulos.sy` | Import entre archivos |
 | `examples/Externo.sy` | Bloques `foreign` |
 | `examples/Pruebas.sy` | Pruebas integradas con `Afirma` |
-| `examples/ServidorHttp.sy` | Servidor HTTP completo |
+| `examples/Json.sy` | `std.json`: parsear, serializar, archivos |
+| `examples/Hilos.sy` | Hilos con `std.hilo` |
+| `examples/ServidorHttp.sy` | Servidor HTTP con keep-alive |
+| `examples/ServidorHilos.sy` | Servidor HTTP multihilo |
 | `examples/BenchJuego.sy` | Benchmark del game loop |
 
 ---
@@ -362,27 +408,31 @@ Para librerías externas, la vía es `foreign`: toda librería C/C++ queda a un 
 ```text
 sylt/
 ├── Makefile              make (compila) · make test · make install
+├── .github/              CI (GitHub Actions) y plantillas de issues
+├── docs/                 guía completa del lenguaje
 ├── src/                  el compilador en C++17
 │   ├── lex, parse        lexer con sangría significativa + parser Pratt
 │   ├── check             tipos, enums, módulos, movimiento, préstamos
-│   ├── gen               backend C++17
-│   ├── genllvm           backend LLVM IR
-│   └── main.cpp          CLI: run, build, check, test, emit
+│   ├── gen, genllvm      backends C++17 y LLVM IR
+│   ├── loader, json      carga de módulos/paquetes + JSON del protocolo
+│   ├── fmt, lsp, pkg     formateador, servidor de lenguaje, gestor de paquetes
+│   └── main.cpp          CLI: run, build, check, test, emit, fmt, lsp, pkg
 ├── sylt_prelude.hpp      runtime: RAII/STL + primitivas sy_*
 ├── lib/std/              biblioteca estándar escrita en Sylt
 ├── examples/             programas de ejemplo (errores/ con errores a propósito)
-└── tests/                suite completa + verificación diferencial llvm
+└── tests/                suite completa + cliente lsp + verificación diferencial llvm
 ```
 
-`make test` ejecuta la suite: compila los ejemplos, comprueba que cada archivo de `examples/errores/` produce su código de error, valida las pruebas integradas, levanta el servidor HTTP y corre el benchmark. Con LLVM instalado, añade la verificación diferencial entre backends; sin él, esa parte se omite sola.
+`make test` ejecuta la suite: compila los ejemplos, comprueba que cada archivo de `examples/errores/` produce su código de error, valida las pruebas integradas, exige el estilo canónico con `fmt --check`, instala y borra un paquete, habla con el lsp y levanta los servidores HTTP. Con LLVM instalado, añade la verificación diferencial entre backends; sin él, esa parte se omite sola.
 
 ---
 
 ## Hoja de ruta
 
-- **v0.4.1**: colecciones (arrays y mapas) en el backend LLVM, `std.*` compilada a IR, `sylt test` en llvm.
-- **v0.5**: HTTP con keep-alive y concurrencia, JSON nativo.
-- **v0.6**: LSP básico, `sylt fmt`, registro de paquetes.
+- **v0.5.0**: `std.json` completo (parser, serializador, archivos) sobre enums recursivos, `Str(x, decimales)`, keep-alive en el servidor HTTP, y dos correcciones de codegen descubiertas al construir JSON (tipos recursivos en módulos y strings dentro de tuplas).
+- **v0.5.1**: backend llvm completo (colecciones, `std.*`, `sylt test`) y concurrencia con hilos (`std.hilo`, servidor multihilo).
+- **v0.6.0 (esta versión)**: `syltc fmt` (estilo canónico, comentarios preservados, `--check` para CI), `syltc lsp` (diagnósticos del checker real en el editor y formato del documento) y `syltc pkg` (paquetes locales y de git en `~/.local/share/sylt/pkg`).
+- **v0.7**: hover y autocompletado en el lsp, registro público de paquetes con versiones, `syltc doc`.
 
 ---
 
