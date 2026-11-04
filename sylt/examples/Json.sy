@@ -1,0 +1,50 @@
+import std.json
+import std.str
+
+fn Main():
+    let Fuente = "{{ \"lang\": \"Sylt\", \"anio\": 2026, \"tags\": [\"rapido\", \"seguro\"], \"ratio\": 0.98, \"deps\": null }}"
+    let (Ok, Err, V) = std.json.Parse(Fuente)
+    if not Ok:
+        Print("error: {Err}")
+        return
+    match V:
+        case Objeto(P):
+            match P["lang"]:
+                case Texto(S):
+                    Print("lang: {S}")
+                case _:
+                    Print("lang: ?")
+            match P["anio"]:
+                case Numero(N):
+                    Print("anio: {N}")
+                case _:
+                    Print("anio: ?")
+            match P["ratio"]:
+                case Numero(R):
+                    Print("ratio: {Str(R, 2)}")
+                case _:
+                    Print("ratio: ?")
+            match P["tags"]:
+                case Lista(Items):
+                    var N = 0
+                    for _ in Items:
+                        N += 1
+                    Print("tags: {N}")
+                case _:
+                    Print("tags: ?")
+            match P["deps"]:
+                case Nulo:
+                    Print("deps: null")
+                case _:
+                    Print("deps: ?")
+        case _:
+            Print("no es un objeto")
+    Print("serial: {std.json.Texto(V)}")
+    std.json.HaciaArchivo(V, "/tmp/sylt_json_ejemplo.json")
+    let (OkA, _ErrA, VA) = std.json.DeArchivo("/tmp/sylt_json_ejemplo.json")
+    Print("roundtrip: {std.json.Texto(VA) == std.json.Texto(V)}")
+    let (OkM, ErrM, _) = std.json.Parse("{{ \"roto\": }}")
+    if OkM:
+        Print("mal: aceptó un json roto")
+    else:
+        Print("error detectado: {ErrM}")

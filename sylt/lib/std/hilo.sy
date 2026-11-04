@@ -1,0 +1,9 @@
+foreign:
+    fn sy_hilo_esperar(Id: int)
+    fn sy_hilo_dormir(Ms: int)
+
+fn Esperar(Id: int):
+    sy_hilo_esperar(Id)
+
+fn Dormir(Ms: int):
+    sy_hilo_dormir(Ms)

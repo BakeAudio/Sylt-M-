@@ -6,6 +6,10 @@ foreign:
     fn sy_net_escuchar(Puerto: int) -> int
     fn sy_net_aceptar(Servidor: int) -> int
     fn sy_net_direccion(Con: int) -> string
+    fn sy_net_listo(Con: int, Ms: int) -> bool
+    fn sy_vigia_crear() -> int
+    fn sy_vigia_vigilar(Vigia: int, Con: int) -> bool
+    fn sy_vigia_esperar(Vigia: int, Ms: int) -> int
     fn SyltAbort(Msg: string)
 
 fn TcpIntentar(Host: string, Puerto: int) -> int:
@@ -34,3 +38,15 @@ fn TcpAceptar(Servidor: int) -> int:
 
 fn TcpDireccion(Con: int) -> string:
     return sy_net_direccion(Con)
+
+fn TcpListo(Con: int, Ms: int) -> bool:
+    return sy_net_listo(Con, Ms)
+
+fn VigiaCrear() -> int:
+    return sy_vigia_crear()
+
+fn VigiaVigilar(Vigia: int, Con: int) -> bool:
+    return sy_vigia_vigilar(Vigia, Con)
+
+fn VigiaEsperar(Vigia: int, Ms: int) -> int:
+    return sy_vigia_esperar(Vigia, Ms)

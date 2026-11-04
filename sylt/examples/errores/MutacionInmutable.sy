@@ -8,4 +8,3 @@ fn Main():
     let C = Contador(Valor: 5)
     C.Sube(3)
     Print("total: {C.Valor}")
-

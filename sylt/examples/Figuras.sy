@@ -1,4 +1,3 @@
-
 type Vec2:
     X: float = 0.0
     Y: float = 0.0
@@ -28,4 +27,3 @@ fn Main():
 
     let D = A
     Print("D (que era A) = {D}")
-

@@ -129,6 +129,8 @@ struct CallExpr : Expr {
     std::vector<bool> ArgMoved;
     std::vector<TypeAnn> TypeArgs;
     bool ReceiverMutable = false;
+    std::string SpawnTarget;
+    int SpawnSite = -1;
     CallExpr() : Expr(Kind::Call) {}
 };
 struct IndexExpr : Expr {

@@ -3,4 +3,3 @@ fn Main():
     let Saludo = "Hola"
     if Edad < Saludo:
         Print("nunca")
-

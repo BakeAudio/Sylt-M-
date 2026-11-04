@@ -1,4 +1,3 @@
-
 type Entidad:
     X: float = 0.0
     Y: float = 0.0
@@ -31,4 +30,3 @@ fn Main():
     Print("por fotograma: {PorFrame} ms")
     Print("FPS estimados: {Fps}")
     Print("energía (verificación): {Energia}")
-

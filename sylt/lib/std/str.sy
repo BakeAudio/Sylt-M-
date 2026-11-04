@@ -12,6 +12,9 @@ foreign:
     fn sy_str_subcadena(S: string, Inicio: int, N: int) -> string
     fn sy_str_caracteres(S: string) -> [string]
     fn sy_str_a_entero(S: string) -> int
+    fn sy_str_a_float(S: string) -> float
+    fn sy_str_codigo(C: string) -> int
+    fn sy_str_desde_codigo(N: int) -> string
 
 fn Dividir(S: string, Sep: string) -> [string]:
     return sy_str_dividir(S, Sep)
@@ -51,6 +54,15 @@ fn Caracteres(S: string) -> [string]:
 
 fn AEntero(S: string) -> int:
     return sy_str_a_entero(S)
+
+fn AFloat(S: string) -> float:
+    return sy_str_a_float(S)
+
+fn Codigo(C: string) -> int:
+    return sy_str_codigo(C)
+
+fn DesdeCodigo(N: int) -> string:
+    return sy_str_desde_codigo(N)
 
 fn Len(S: string) -> int:
     return S.Len()

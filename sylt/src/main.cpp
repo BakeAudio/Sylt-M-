@@ -1,43 +1,19 @@
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <iostream>
-#include <sstream>
 #include "check.hpp"
 #include "diag.hpp"
+#include "fmt.hpp"
 #include "gen.hpp"
 #include "genllvm.hpp"
-#include "lex.hpp"
-#include "parse.hpp"
+#include "loader.hpp"
+#include "lsp.hpp"
+#include "pkg.hpp"
+#include <sys/wait.h>
+#include <fstream>
+#include <iostream>
+#include <unordered_map>
 using namespace sylt;
-static bool ReadFile(const std::string& Path, std::string& Out) {
-    std::ifstream F(Path, std::ios::binary);
-    if (!F) return false;
-    std::ostringstream S;
-    S << F.rdbuf();
-    Out = S.str();
-    return true;
-}
-static std::string ExeDir() {
-    char Buf[4096];
-    ssize_t N = readlink("/proc/self/exe", Buf, sizeof(Buf) - 1);
-    if (N <= 0) return ".";
-    Buf[N] = 0;
-    std::string P(Buf);
-    size_t S = P.rfind('/');
-    if (S == std::string::npos) return ".";
-    return P.substr(0, S);
-}
-static bool FileExists(const std::string& P) {
-    struct stat B;
-    return stat(P.c_str(), &B) == 0;
-}
 static void PrintUsage() {
     std::cout <<
-        "syltc — compilador de Sylt (0.4)\n"
+        "syltc — compilador de Sylt (0.6)\n"
         "\n"
         "Uso:\n"
         "  syltc run   archivo.sy      compila en un temporal y ejecuta\n"
@@ -45,6 +21,9 @@ static void PrintUsage() {
         "  syltc check archivo.sy      solo comprueba (tipos + movimiento)\n"
         "  syltc test  archivo.sy      ejecuta las pruebas Prueba* del archivo\n"
         "  syltc emit  archivo.sy      muestra el código generado (C++ o IR LLVM)\n"
+        "  syltc fmt   ruta...         formatea archivos o directorios en el sitio\n"
+        "  syltc lsp                   servidor de lenguaje (JSON-RPC por stdio)\n"
+        "  syltc pkg   add|list|remove gestor de paquetes\n"
         "\n"
         "Opciones:\n"
         "  --backend=cpp|llvm    cpp: transpila a C++17 (por defecto)\n"
@@ -55,137 +34,26 @@ static void PrintUsage() {
         "  --prelude=RUTA        ruta de sylt_prelude.hpp\n"
         "                        (también busca en $SYLT_PRELUDE y ~/.local/share/sylt/)\n"
         "  --lib=RUTA            ruta de la librería estándar (std.*)\n"
+        "  --pkg=RUTA            ruta del registro local de paquetes\n"
+        "                        (también $SYLT_PKG, por defecto ~/.local/share/sylt/pkg)\n"
+        "  --check               con fmt: no escribe, solo informa lo que cambiaría\n"
         "  --keep                conserva el código generado (en /tmp)\n"
         "  --no-color            desactiva el color\n";
 }
 struct Args {
     std::string Cmd;
-    std::string File;
+    std::vector<std::string> Archivos;
     std::string Out;
     std::string Cc = "g++";
     std::string Opt = "-O2";
     std::string Prelude;
     std::string Lib;
+    std::string Pkg;
     std::string Backend = "cpp";
     bool Fast = false;
     bool Keep = false;
     bool Color = true;
-};
-struct ModuleUnit {
-    std::string Name;
-    std::string Path;
-    SourceFile Src;
-    ProgramP Prog;
-};
-struct Loader {
-    Reporter& Rep;
-    std::string LibDir;
-    std::unordered_map<std::string, size_t> Index;
-    std::vector<ModuleUnit> Units;
-    std::vector<std::string> Stack;
-    Loader(Reporter& rep, const std::string& lib) : Rep(rep), LibDir(lib) {}
-    std::string DirOf(const std::string& path) const {
-        size_t S = path.rfind('/');
-        return (S == std::string::npos) ? "." : path.substr(0, S);
-    }
-    ProgramP ParseUnit(ModuleUnit& U) {
-        auto Tokens = Lex(U.Src, Rep);
-        return Parse(Tokens, U.Src, Rep);
-    }
-    bool Load(const std::string& path, const std::string& name, bool isStd) {
-        for (auto& s : Stack) {
-            if (s != name) continue;
-            std::string cyc;
-            bool started = false;
-            for (auto& p : Stack) {
-                if (p == name) started = true;
-                if (started) cyc += (cyc.empty() ? "" : " -> ") + p;
-            }
-            cyc += " -> " + name;
-            Diag d = Rep.ErrNoSpan("E0702",
-                "importación circular de módulos: " + cyc);
-            d.Helps.push_back("los módulos no pueden importarse entre sí en círculo; "
-                              "extrae lo común a un tercer módulo");
-            Rep.Emit(d);
-            return false;
-        }
-        if (Index.count(name)) return true;
-        std::string Text;
-        if (!ReadFile(path, Text)) {
-            Diag d = Rep.ErrNoSpan("E0701",
-                "no encuentro el módulo `" + name + "`");
-            d.Helps.push_back("busqué en: " + path);
-            if (!isStd)
-                d.Helps.push_back("los módulos propios viven en un archivo `nombre.sy` "
-                                  "junto al que importa");
-            else
-                d.Helps.push_back("si instalaste Sylt en otra ruta, usa --lib=RUTA");
-            Rep.Emit(d);
-            return false;
-        }
-        Stack.push_back(name);
-        ModuleUnit U;
-        U.Name = name;
-        U.Path = path;
-        U.Src.Load(path, Text);
-        Rep.Use(&U.Src);
-        U.Prog = ParseUnit(U);
-        bool ok = true;
-        for (auto& im : U.Prog->Imports) {
-            if (im.Module == "std" || StartsWith(im.Module, "std.")) {
-                std::string sub = im.Module.substr(4);
-                std::string p2 = LibDir + "/std/" + sub + ".sy";
-                if (!Load(p2, im.Module, true)) ok = false;
-                continue;
-            }
-            if (im.Module.find('.') != std::string::npos) {
-                Diag d = Rep.Err("E0701", im.Sp,
-                    "el módulo `" + im.Module + "` no existe");
-                d.Helps.push_back("los puntos solo valen para la librería estándar (std.*); "
-                                  "los módulos propios son un solo nombre");
-                Rep.Emit(d);
-                ok = false;
-                continue;
-            }
-            std::string p2 = DirOf(path) + "/" + im.Module + ".sy";
-            if (!Load(p2, im.Module, false)) ok = false;
-        }
-        Stack.pop_back();
-        Index[name] = Units.size();
-        Units.push_back(std::move(U));
-        Rep.Use(nullptr);
-        return ok;
-    }
-    ProgramP Merge() {
-        ProgramP all(new Program);
-        for (auto& U : Units) {
-            std::string mod = (U.Name == "__main__") ? "" : U.Name;
-            for (auto& inc : U.Prog->ForeignIncludes) {
-                bool have = false;
-                for (auto& s : all->ForeignIncludes) have |= (s == inc);
-                if (!have) all->ForeignIncludes.push_back(inc);
-            }
-            for (auto& im : U.Prog->Imports) {
-                bool have = false;
-                for (auto& s : all->Imports) have |= (s.Module == im.Module);
-                if (!have) all->Imports.push_back(im);
-            }
-            for (auto& fd : U.Prog->Fns) {
-                fd->Module = mod;
-                all->Fns.push_back(std::move(fd));
-            }
-            for (auto& td : U.Prog->Types) {
-                td->Module = mod;
-                for (auto& m : td->Methods) m->Module = mod;
-                all->Types.push_back(std::move(td));
-            }
-            for (auto& ed : U.Prog->Enums) {
-                ed->Module = mod;
-                all->Enums.push_back(std::move(ed));
-            }
-        }
-        return all;
-    }
+    bool CheckFmt = false;
 };
 int main(int argc, char** argv) {
     Args A;
@@ -196,14 +64,15 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string s = argv[i];
         if (s == "--version" || s == "-v") {
-            std::cout << "syltc 0.4.0 — compilador de Sylt\n";
+            std::cout << "syltc 0.6.0 — compilador de Sylt\n";
             return 0;
         }
         if (s == "--help" || s == "-h" || s == "help") {
             PrintUsage();
             return 0;
         }
-        if (s == "run" || s == "build" || s == "check" || s == "emit" || s == "test") {
+        if (s == "run" || s == "build" || s == "check" || s == "emit" || s == "test" ||
+            s == "fmt" || s == "lsp" || s == "pkg") {
             if (!A.Cmd.empty()) {
                 std::cerr << "solo un comando por invocación (" << A.Cmd << " y " << s
                           << ")\n";
@@ -215,6 +84,7 @@ int main(int argc, char** argv) {
         if (s == "--fast") A.Fast = true;
         else if (s == "--keep") A.Keep = true;
         else if (s == "--no-color") A.Color = false;
+        else if (s == "--check") A.CheckFmt = true;
         else if (s == "--O0") A.Opt = "-O0";
         else if (s == "--O1") A.Opt = "-O1";
         else if (s == "--O2") A.Opt = "-O2";
@@ -223,58 +93,60 @@ int main(int argc, char** argv) {
         else if (StartsWith(s, "--backend=")) A.Backend = s.substr(10);
         else if (StartsWith(s, "--prelude=")) A.Prelude = s.substr(10);
         else if (StartsWith(s, "--lib=")) A.Lib = s.substr(6);
+        else if (StartsWith(s, "--pkg=")) A.Pkg = s.substr(6);
         else if (s == "-o" && i + 1 < argc) A.Out = argv[++i];
         else if (!s.empty() && s[0] == '-') {
             std::cerr << "opción desconocida: " << s << "\n";
             return 2;
         } else {
-            if (!A.File.empty()) {
-                std::cerr << "solo puedo compilar un archivo cada vez (" << A.File
-                          << " y " << s << ")\n";
-                return 2;
-            }
-            A.File = s;
+            A.Archivos.push_back(s);
         }
     }
     if (A.Cmd.empty()) {
-        if (!A.File.empty())
-            std::cerr << "falta el comando: prueba `syltc run " << A.File << "`\n";
+        if (!A.Archivos.empty())
+            std::cerr << "falta el comando: prueba `syltc run " << A.Archivos[0] << "`\n";
         else
             std::cerr << "falta el comando\nprueba: syltc run archivo.sy   (o syltc --help)\n";
         return 2;
     }
-    if (A.File.empty()) {
+    if (getenv("NO_COLOR")) A.Color = false;
+    if (!isatty(1)) A.Color = false;
+    if (A.Cmd == "lsp") {
+        if (!A.Archivos.empty()) {
+            std::cerr << "lsp no toma archivos: lee y escribe en stdin/stdout\n";
+            return 2;
+        }
+        return RunLsp();
+    }
+    if (A.Cmd == "pkg") return RunPkg(A.Archivos, A.Pkg);
+    if (A.Cmd == "fmt") return RunFmt(A.Archivos, A.CheckFmt);
+    if (A.Archivos.empty()) {
         std::cerr << "falta el archivo .sy a compilar\n";
         std::cerr << "prueba: syltc run " << "ejemplo.sy\n";
         return 2;
     }
+    if (A.Archivos.size() > 1) {
+        std::cerr << "solo puedo compilar un archivo cada vez (" << A.Archivos[0]
+                  << " y " << A.Archivos[1] << ")\n";
+        return 2;
+    }
+    std::string Archivo = A.Archivos[0];
     if (A.Backend != "cpp" && A.Backend != "llvm") {
         std::cerr << "backend desconocido: `" << A.Backend << "` (valen: cpp, llvm)\n";
         return 2;
     }
-    if (getenv("NO_COLOR")) A.Color = false;
-    if (!isatty(1)) A.Color = false;
-    std::string Lib = A.Lib;
-    if (Lib.empty() && getenv("SYLT_LIB")) Lib = getenv("SYLT_LIB");
-    if (Lib.empty()) {
-        std::string Home = getenv("HOME") ? getenv("HOME") : "";
-        std::string C1 = ExeDir() + "/lib";
-        std::string C2 = ExeDir() + "/../lib";
-        std::string C3 = Home.empty() ? "" : Home + "/.local/share/sylt/lib";
-        if (FileExists(C1)) Lib = C1;
-        else if (FileExists(C2)) Lib = C2;
-        else if (!C3.empty() && FileExists(C3)) Lib = C3;
-    }
+    std::string Lib = ResolveLibDir(A.Lib);
     std::string Text;
-    if (!ReadFile(A.File, Text)) {
-        std::cerr << "no puedo leer `" << A.File << "`: ¿existe y tiene permisos?\n";
+    if (!ReadFile(A.Archivos[0], Text)) {
+        std::cerr << "no puedo leer `" << A.Archivos[0] << "`: ¿existe y tiene permisos?\n";
         return 2;
     }
     SourceFile Src;
-    Src.Load(A.File, Text);
+    Src.Load(A.Archivos[0], Text);
     Reporter Rep(Src, A.Color);
     Loader Ld(Rep, Lib);
-    if (!Ld.Load(A.File, "__main__", false)) {
+    Ld.PkgDir = ResolvePkgDir(A.Pkg);
+    if (!Ld.Load(A.Archivos[0], "__main__", false)) {
         std::cout << "no se pudo compilar: " << Rep.ErrorCount()
                   << (Rep.ErrorCount() == 1 ? " error, " : " errores, ")
                   << Rep.WarningCount()
@@ -355,13 +227,6 @@ int main(int argc, char** argv) {
                       << (Rep.ErrorCount() == 1 ? " error\n" : " errores\n");
             return 1;
         }
-        if (A.Backend == "llvm") {
-            Diag d = Rep.ErrNoSpan("E0901", "sylt test con --backend=llvm llega en la v0.4.1");
-            d.Helps.push_back("por ahora las pruebas usan el backend cpp (el de por defecto)");
-            Rep.Emit(d);
-            std::cout << "no se pudo compilar: 1 error\n";
-            return 1;
-        }
         Go.TestFns = Tests;
     }
     std::string Code;
@@ -374,8 +239,8 @@ int main(int argc, char** argv) {
             if (sp.Line < 1 || sp.Line > (int)Src.Lines.size()) sp = Span();
             Diag d = Rep.Err("E0901", sp, U.Msg);
             d.Helps.push_back(
-                "el backend llvm cubre el núcleo (números, strings, structs, enums, "
-                "control de flujo); las colecciones y std.* llegan en v0.4.1");
+                "el backend llvm cubre el núcleo, colecciones, std.* y pruebas; "
+                "lo que falte se apunta como trabajo pendiente del roadmap");
             d.Helps.push_back("usa --backend=cpp para compilar este programa completo");
             Rep.Emit(d);
             std::cout << "no se pudo compilar: " << Rep.ErrorCount()
@@ -391,16 +256,7 @@ int main(int argc, char** argv) {
         std::cout << Code;
         return 0;
     }
-    std::string Prelude = A.Prelude;
-    if (Prelude.empty() && getenv("SYLT_PRELUDE")) Prelude = getenv("SYLT_PRELUDE");
-    if (Prelude.empty()) {
-        std::string Home = getenv("HOME") ? getenv("HOME") : "";
-        std::string C1 = ExeDir() + "/sylt_prelude.hpp";
-        std::string C2 = Home.empty() ? "" : Home + "/.local/share/sylt/sylt_prelude.hpp";
-        if (FileExists(C1)) Prelude = C1;
-        else if (!C2.empty() && FileExists(C2)) Prelude = C2;
-        else Prelude = C1;
-    }
+    std::string Prelude = ResolvePrelude(A.Prelude);
     if (!FileExists(Prelude)) {
         std::cerr << "no encuentro sylt_prelude.hpp\n";
         std::cerr << "busqué junto al binario, en $SYLT_PRELUDE y en ~/.local/share/sylt/\n";
@@ -433,23 +289,43 @@ int main(int argc, char** argv) {
     }
     std::string Out = A.Out;
     if (Out.empty()) {
-        std::string Base = A.File;
+        std::string Base = A.Archivos[0];
         size_t S = Base.rfind('/');
         if (S != std::string::npos) Base = Base.substr(S + 1);
         size_t D = Base.rfind('.');
         if (D != std::string::npos) Base = Base.substr(0, D);
         Out = Base;
     }
+    std::string RtPath;
+    if (A.Backend == "llvm") {
+        std::vector<std::string> Candidatos;
+        if (!Lib.empty()) Candidatos.push_back(Lib + "/rt/sylt_rt.c");
+        Candidatos.push_back(ExeDir() + "/../lib/rt/sylt_rt.c");
+        Candidatos.push_back(ExeDir() + "/lib/rt/sylt_rt.c");
+        std::string Home = HomeDir();
+        if (!Home.empty())
+            Candidatos.push_back(Home + "/.local/share/sylt/lib/rt/sylt_rt.c");
+        for (auto& C : Candidatos)
+            if (FileExists(C)) {
+                RtPath = C;
+                break;
+            }
+        if (RtPath.empty()) {
+            std::cerr << "no encuentro lib/rt/sylt_rt.c (el runtime en C del backend llvm)\n";
+            std::cerr << "usa --lib=RUTA para indicar dónde está la librería\n";
+            return 2;
+        }
+    }
     std::string Cmd;
     if (A.Backend == "llvm") {
         if (A.Cc == "g++") {
             std::cerr << "el backend llvm emite IR (.ll) y lo enlaza clang: pasa --cc=clang\n";
-            std::cerr << "para ver el IR sin enlazar: syltc emit --backend=llvm " << A.File
+            std::cerr << "para ver el IR sin enlazar: syltc emit --backend=llvm " << A.Archivos[0]
                       << "\n";
             return 2;
         }
-        Cmd = A.Cc + " " + A.Opt + " -w \"" + CppPath + "\" -o \"" +
-              (A.Cmd == "run" || A.Cmd == "test" ? TmpDir + "/prog" : Out) + "\" -lm";
+        Cmd = A.Cc + " " + A.Opt + " -w \"" + CppPath + "\" \"" + RtPath + "\" -o \"" +
+              (A.Cmd == "run" || A.Cmd == "test" ? TmpDir + "/prog" : Out) + "\" -lm -lpthread";
     } else {
         Cmd = A.Cc + " -std=c++17 " + A.Opt + " -w -I\"" + PreludeDir +
               "\" \"" + CppPath + "\" -o \"" +
@@ -467,7 +343,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (A.Cmd == "build") {
-        std::cout << "compilado: " << A.File << " -> " << Out << "\n";
+        std::cout << "compilado: " << A.Archivos[0] << " -> " << Out << "\n";
         return 0;
     }
     std::string RunCmd = TmpDir + "/prog";

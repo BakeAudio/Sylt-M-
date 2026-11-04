@@ -58,7 +58,7 @@ public:
                     return Type::StructOf(it != QualNames.end() ? it->second : a.Name);
                 }
                 if (!CurModule.empty()) {
-                    std::string k = CurModule + "__" + a.Name;
+                    std::string k = Key(CurModule, a.Name);
                     if (TypeByName.count(k) || EnumByName.count(k)) return Type::StructOf(k);
                 }
                 return Type::StructOf(a.Name);
@@ -136,6 +136,7 @@ public:
         O << "#include \"sylt_prelude.hpp\"\n";
         for (auto& inc : Prog->ForeignIncludes) L("#include " + inc);
         if (!Prog->ForeignIncludes.empty()) O << "\n";
+        EmitSpawnTrampolines();
         EmitForwardDecls();
         EmitTypesInOrder();
         EmitStrOverloads();
@@ -143,6 +144,312 @@ public:
         EmitStructMethods();
         EmitFnBodies();
         EmitMain();
+    }
+    void WalkBlock(const Block& b) {
+        for (auto& s : b.Stmts) WalkStmt(s.get());
+    }
+    void WalkStmt(Stmt* st) {
+        switch (st->K) {
+            case Stmt::Kind::Let: {
+                auto* s = static_cast<LetStmt*>(st);
+                WalkExpr(s->Init.get());
+                return;
+            }
+            case Stmt::Kind::Assign: {
+                auto* s = static_cast<AssignStmt*>(st);
+                WalkExpr(s->Target.get());
+                WalkExpr(s->Value.get());
+                return;
+            }
+            case Stmt::Kind::Expr:
+                WalkExpr(static_cast<ExprStmt*>(st)->Sub.get());
+                return;
+            case Stmt::Kind::Return: {
+                auto* s = static_cast<ReturnStmt*>(st);
+                if (s->Value) WalkExpr(s->Value.get());
+                return;
+            }
+            case Stmt::Kind::If: {
+                auto* s = static_cast<IfStmt*>(st);
+                WalkExpr(s->Cond.get());
+                WalkBlock(s->Then);
+                for (auto& br : s->Elifs) {
+                    WalkExpr(br.Cond.get());
+                    WalkBlock(br.Body);
+                }
+                if (s->HasElse) WalkBlock(s->Else);
+                return;
+            }
+            case Stmt::Kind::While: {
+                auto* s = static_cast<WhileStmt*>(st);
+                WalkExpr(s->Cond.get());
+                WalkBlock(s->Body);
+                return;
+            }
+            case Stmt::Kind::For: {
+                auto* s = static_cast<ForStmt*>(st);
+                WalkExpr(s->Low.get());
+                if (s->IsRange && s->High) WalkExpr(s->High.get());
+                WalkBlock(s->Body);
+                return;
+            }
+            case Stmt::Kind::Match: {
+                auto* s = static_cast<MatchStmt*>(st);
+                WalkExpr(s->Subject.get());
+                for (auto& arm : s->Arms) {
+                    if (arm.Pat.Lit) WalkExpr(arm.Pat.Lit.get());
+                    WalkBlock(arm.Body);
+                }
+                return;
+            }
+            default:
+                return;
+        }
+    }
+    void WalkExpr(Expr* e) {
+        if (!e) return;
+        switch (e->K) {
+            case Expr::Kind::Call: {
+                auto* c = static_cast<CallExpr*>(e);
+                WalkExpr(c->Callee.get());
+                for (auto& a : c->Args) WalkExpr(a.Value.get());
+                if (c->Resolved == CallExpr::Target::Builtin &&
+                    c->TargetName == "HiloLanzar" && !c->SpawnTarget.empty())
+                    c->SpawnSite = SpawnSites++;
+                return;
+            }
+            case Expr::Kind::Unary:
+                WalkExpr(static_cast<UnaryExpr*>(e)->Sub.get());
+                return;
+            case Expr::Kind::Binary: {
+                auto* b = static_cast<BinaryExpr*>(e);
+                WalkExpr(b->L.get());
+                WalkExpr(b->R.get());
+                return;
+            }
+            case Expr::Kind::Index: {
+                auto* ix = static_cast<IndexExpr*>(e);
+                WalkExpr(ix->Base.get());
+                WalkExpr(ix->Idx.get());
+                return;
+            }
+            case Expr::Kind::Member:
+                WalkExpr(static_cast<MemberExpr*>(e)->Base.get());
+                return;
+            case Expr::Kind::StrLit:
+                for (auto& p : static_cast<StrLitExpr*>(e)->Parts)
+                    if (!p.IsText) WalkExpr(p.Sub.get());
+                return;
+            case Expr::Kind::ArrayLit:
+                for (auto& x : static_cast<ArrayLitExpr*>(e)->Elems) WalkExpr(x.get());
+                return;
+            case Expr::Kind::MapLit:
+                for (auto& p : static_cast<MapLitExpr*>(e)->Pairs) {
+                    WalkExpr(p.Key.get());
+                    WalkExpr(p.Val.get());
+                }
+                return;
+            case Expr::Kind::TupleLit:
+                for (auto& x : static_cast<TupleLitExpr*>(e)->Elems) WalkExpr(x.get());
+                return;
+            default:
+                return;
+        }
+    }
+    int SpawnSites = 0;
+    void EmitSpawnTrampolines() {
+        for (auto& fd : Prog->Fns) {
+            if (fd->Foreign) continue;
+            WalkBlock(fd->Body);
+        }
+        for (auto& td : Prog->Types)
+            for (auto& m : td->Methods) {
+                if (!td->TypeParams.empty()) continue;
+                WalkBlock(m->Body);
+            }
+        if (SpawnSites == 0) return;
+        for (int site = 0; site < SpawnSites; site++) {
+            Expr* hallado = nullptr;
+            for (auto& fd : Prog->Fns) {
+                if (fd->Foreign) continue;
+                hallado = BuscaSite(fd->Body, site);
+                if (hallado) break;
+            }
+            if (!hallado)
+                for (auto& td : Prog->Types) {
+                    if (!td->TypeParams.empty()) continue;
+                    for (auto& m : td->Methods) {
+                        hallado = BuscaSite(m->Body, site);
+                        if (hallado) break;
+                    }
+                    if (hallado) break;
+                }
+            auto* c = static_cast<CallExpr*>(hallado);
+            auto f = FnByName.find(c->SpawnTarget);
+            std::vector<Param*> ps;
+            if (f != FnByName.end())
+                for (auto& p : f->second->Params)
+                    if (!p.IsSelf) ps.push_back(&p);
+            std::string ctx = "SyltCtx" + std::to_string(site);
+            std::string tramp = "SyltTramp" + std::to_string(site);
+            std::string campos, uses, tipos;
+            for (size_t i = 0; i < ps.size(); i++) {
+                Type pt = TypeOf(ps[i]->Ty);
+                campos += (i ? " " : "") + CppType(pt) + " A" + std::to_string(i) + ";";
+                uses += (i ? ", " : "") + std::string("C->A") + std::to_string(i);
+                tipos += (i ? ", " : "") + CppType(pt);
+            }
+            if (f != FnByName.end()) {
+                std::string ret = f->second->HasRet ? CppType(TypeOf(f->second->Ret)) : "void";
+                L("static " + ret + " " + c->SpawnTarget + "(" + tipos + ");");
+            }
+            L("struct " + ctx + " {");
+            Ind++;
+            L(campos);
+            Ind--;
+            L("};");
+            L("static void " + tramp + "(void* P) {");
+            Ind++;
+            L(ctx + "* C = (" + ctx + "*)P;");
+            L(c->SpawnTarget + "(" + uses + ");");
+            L("delete C;");
+            Ind--;
+            L("}");
+        }
+        L("");
+    }
+    Expr* BuscaSite(const Block& b, int site) {
+        for (auto& s : b.Stmts) {
+            Expr* r = BuscaSiteStmt(s.get(), site);
+            if (r) return r;
+        }
+        return nullptr;
+    }
+    Expr* BuscaSiteStmt(Stmt* st, int site) {
+        switch (st->K) {
+            case Stmt::Kind::Let:
+                return BuscaSiteExpr(static_cast<LetStmt*>(st)->Init.get(), site);
+            case Stmt::Kind::Assign: {
+                auto* s = static_cast<AssignStmt*>(st);
+                Expr* r = BuscaSiteExpr(s->Target.get(), site);
+                if (r) return r;
+                return BuscaSiteExpr(s->Value.get(), site);
+            }
+            case Stmt::Kind::Expr:
+                return BuscaSiteExpr(static_cast<ExprStmt*>(st)->Sub.get(), site);
+            case Stmt::Kind::Return: {
+                auto* s = static_cast<ReturnStmt*>(st);
+                return s->Value ? BuscaSiteExpr(s->Value.get(), site) : nullptr;
+            }
+            case Stmt::Kind::If: {
+                auto* s = static_cast<IfStmt*>(st);
+                Expr* r = BuscaSiteExpr(s->Cond.get(), site);
+                if (r) return r;
+                r = BuscaSite(s->Then, site);
+                if (r) return r;
+                for (auto& br : s->Elifs) {
+                    r = BuscaSiteExpr(br.Cond.get(), site);
+                    if (r) return r;
+                    r = BuscaSite(br.Body, site);
+                    if (r) return r;
+                }
+                if (s->HasElse) return BuscaSite(s->Else, site);
+                return nullptr;
+            }
+            case Stmt::Kind::While: {
+                auto* s = static_cast<WhileStmt*>(st);
+                Expr* r = BuscaSiteExpr(s->Cond.get(), site);
+                if (r) return r;
+                return BuscaSite(s->Body, site);
+            }
+            case Stmt::Kind::For: {
+                auto* s = static_cast<ForStmt*>(st);
+                Expr* r = BuscaSiteExpr(s->Low.get(), site);
+                if (r) return r;
+                if (s->IsRange && s->High) {
+                    r = BuscaSiteExpr(s->High.get(), site);
+                    if (r) return r;
+                }
+                return BuscaSite(s->Body, site);
+            }
+            case Stmt::Kind::Match: {
+                auto* s = static_cast<MatchStmt*>(st);
+                Expr* r = BuscaSiteExpr(s->Subject.get(), site);
+                if (r) return r;
+                for (auto& arm : s->Arms) {
+                    if (arm.Pat.Lit) {
+                        r = BuscaSiteExpr(arm.Pat.Lit.get(), site);
+                        if (r) return r;
+                    }
+                    r = BuscaSite(arm.Body, site);
+                    if (r) return r;
+                }
+                return nullptr;
+            }
+            default:
+                return nullptr;
+        }
+    }
+    Expr* BuscaSiteExpr(Expr* e, int site) {
+        if (!e) return nullptr;
+        if (e->K == Expr::Kind::Call) {
+            auto* c = static_cast<CallExpr*>(e);
+            if (c->Resolved == CallExpr::Target::Builtin &&
+                c->TargetName == "HiloLanzar" && c->SpawnSite == site)
+                return e;
+            for (auto& a : c->Args) {
+                Expr* r = BuscaSiteExpr(a.Value.get(), site);
+                if (r) return r;
+            }
+            return nullptr;
+        }
+        switch (e->K) {
+            case Expr::Kind::Unary:
+                return BuscaSiteExpr(static_cast<UnaryExpr*>(e)->Sub.get(), site);
+            case Expr::Kind::Binary: {
+                auto* b = static_cast<BinaryExpr*>(e);
+                Expr* r = BuscaSiteExpr(b->L.get(), site);
+                if (r) return r;
+                return BuscaSiteExpr(b->R.get(), site);
+            }
+            case Expr::Kind::Index: {
+                auto* ix = static_cast<IndexExpr*>(e);
+                Expr* r = BuscaSiteExpr(ix->Base.get(), site);
+                if (r) return r;
+                return BuscaSiteExpr(ix->Idx.get(), site);
+            }
+            case Expr::Kind::Member:
+                return BuscaSiteExpr(static_cast<MemberExpr*>(e)->Base.get(), site);
+            case Expr::Kind::StrLit:
+                for (auto& p : static_cast<StrLitExpr*>(e)->Parts)
+                    if (!p.IsText) {
+                        Expr* r = BuscaSiteExpr(p.Sub.get(), site);
+                        if (r) return r;
+                    }
+                return nullptr;
+            case Expr::Kind::ArrayLit:
+                for (auto& x : static_cast<ArrayLitExpr*>(e)->Elems) {
+                    Expr* r = BuscaSiteExpr(x.get(), site);
+                    if (r) return r;
+                }
+                return nullptr;
+            case Expr::Kind::MapLit:
+                for (auto& p : static_cast<MapLitExpr*>(e)->Pairs) {
+                    Expr* r = BuscaSiteExpr(p.Key.get(), site);
+                    if (r) return r;
+                    r = BuscaSiteExpr(p.Val.get(), site);
+                    if (r) return r;
+                }
+                return nullptr;
+            case Expr::Kind::TupleLit:
+                for (auto& x : static_cast<TupleLitExpr*>(e)->Elems) {
+                    Expr* r = BuscaSiteExpr(x.get(), site);
+                    if (r) return r;
+                }
+                return nullptr;
+            default:
+                return nullptr;
+        }
     }
     void EmitForwardDecls() {
         for (auto& td : Prog->Types) {
@@ -769,10 +1076,13 @@ public:
                 auto* t = static_cast<TupleLitExpr*>(e);
                 std::string s = "std::make_tuple(";
                 bool first = true;
-                for (auto& el : t->Elems) {
+                for (size_t ei = 0; ei < t->Elems.size(); ei++) {
                     if (!first) s += ", ";
                     first = false;
-                    s += GenExpr(el.get());
+                    std::string code = GenExpr(t->Elems[ei].get());
+                    if (ei < t->Ty.Sub.size() && t->Ty.Sub[ei].IsStr())
+                        code = "std::string(" + code + ")";
+                    s += code;
                 }
                 return s + ")";
             }
@@ -797,7 +1107,11 @@ public:
                 const std::string& n = c->TargetName;
                 if (n == "TiempoMs") return "SyltTiempoMs()";
                 if (n == "Print") return "SyltPrint(" + ArgCode(c, 0) + ")";
-                if (n == "Str") return "SyltStr(" + ArgCode(c, 0) + ")";
+                if (n == "Str") {
+                    if (c->Args.size() == 2)
+                        return "SyltStrPrec(" + ArgCode(c, 0) + ", " + ArgCode(c, 1) + ")";
+                    return "SyltStr(" + ArgCode(c, 0) + ")";
+                }
                 if (n == "Sqrt") return "SyltSqrt(" + ArgCode(c, 0) + ")";
                 if (n == "Abs") return "SyltAbs(" + ArgCode(c, 0) + ")";
                 if (n == "Floor") return "SyltFloor(" + ArgCode(c, 0) + ")";
@@ -808,6 +1122,16 @@ public:
                 if (n == "Afirma")
                     return "SyAfirma(" + ArgCode(c, 0) + ", " + ArgCode(c, 1) + ", " +
                            std::to_string(c->Sp.Line) + ")";
+                if (n == "HiloLanzar") {
+                    std::string S = "sy_hilo_lanzar(&SyltTramp" +
+                                    std::to_string(c->SpawnSite) + ", new SyltCtx" +
+                                    std::to_string(c->SpawnSite) + "{";
+                    for (size_t i = 1; i < c->Args.size(); i++) {
+                        if (i > 1) S += ", ";
+                        S += ArgCode(c, i);
+                    }
+                    return S + "})";
+                }
                 return "0";
             }
             case CallExpr::Target::Fn: {

@@ -32,6 +32,13 @@ inline std::string SyltStr(double V) {
         S += ".0";
     return S;
 }
+inline std::string SyltStrPrec(double V, int64_t D) {
+    if (D < 0) D = 0;
+    if (D > 17) D = 17;
+    char Buf[64];
+    std::snprintf(Buf, sizeof(Buf), "%.*f", (int)D, V);
+    return std::string(Buf);
+}
 inline std::string SyltStr(const std::string& V) { return V; }
 inline std::string SyltStr(const char* V) { return std::string(V); }
 template <class T>
@@ -266,6 +273,42 @@ inline int64_t sy_str_a_entero(const std::string& S) {
     while (b > a && (unsigned char)T[b - 1] <= ' ') b--;
     return (int64_t)strtoll(T.substr(a, b - a).c_str(), nullptr, 10);
 }
+inline double sy_str_a_float(const std::string& S) {
+    std::string T = S;
+    size_t a = 0, b = T.size();
+    while (a < b && (unsigned char)T[a] <= ' ') a++;
+    while (b > a && (unsigned char)T[b - 1] <= ' ') b--;
+    return strtod(T.substr(a, b - a).c_str(), nullptr);
+}
+inline int64_t sy_str_codigo(const std::string& S) {
+    if (S.empty()) return 0;
+    unsigned char c = (unsigned char)S[0];
+    if (c < 0x80) return c;
+    size_t L = c >= 0xF0 ? 4 : (c >= 0xE0 ? 3 : (c >= 0xC0 ? 2 : 1));
+    if (L > S.size()) return c;
+    int64_t R = c & (0x7F >> (int)L);
+    for (size_t i = 1; i < L; i++) R = (R << 6) | ((unsigned char)S[i] & 0x3F);
+    return R;
+}
+inline std::string sy_str_desde_codigo(int64_t N) {
+    if (N < 0 || N > 0x10FFFF) return "";
+    if (N < 0x80) return std::string(1, (char)N);
+    std::string R;
+    if (N < 0x800) {
+        R += (char)(0xC0 | (N >> 6));
+        R += (char)(0x80 | (N & 0x3F));
+    } else if (N < 0x10000) {
+        R += (char)(0xE0 | (N >> 12));
+        R += (char)(0x80 | ((N >> 6) & 0x3F));
+        R += (char)(0x80 | (N & 0x3F));
+    } else {
+        R += (char)(0xF0 | (N >> 18));
+        R += (char)(0x80 | ((N >> 12) & 0x3F));
+        R += (char)(0x80 | ((N >> 6) & 0x3F));
+        R += (char)(0x80 | (N & 0x3F));
+    }
+    return R;
+}
 inline std::string sy_io_leer_linea() {
     std::string L;
     if (!std::getline(std::cin, L)) return "";
@@ -295,6 +338,61 @@ inline bool sy_io_existe(const std::string& Ruta) {
 inline int64_t sy_time_epoch_ms() {
     using namespace std::chrono;
     return (int64_t)duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+inline double sy_mono_ms() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+#include <mutex>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <thread>
+inline std::mutex SyltHiloMx;
+inline std::vector<std::thread*> SyltHilos;
+inline int64_t SyltHiloN = 0;
+inline int64_t sy_hilo_lanzar(void (*Fn)(void*), void* Ctx) {
+    std::lock_guard<std::mutex> Lk(SyltHiloMx);
+    std::thread* T = new std::thread([Fn, Ctx]() { Fn(Ctx); });
+    SyltHilos.push_back(T);
+    SyltHiloN += 1;
+    return SyltHiloN;
+}
+inline void sy_hilo_esperar(int64_t Id) {
+    std::thread* T = nullptr;
+    {
+        std::lock_guard<std::mutex> Lk(SyltHiloMx);
+        if (Id < 1 || Id > (int64_t)SyltHilos.size()) return;
+        T = SyltHilos[Id - 1];
+        if (!T) return;
+        SyltHilos[Id - 1] = nullptr;
+    }
+    T->join();
+    delete T;
+}
+inline void sy_hilo_dormir(int64_t Ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(Ms));
+}
+inline int64_t sy_vigia_crear() {
+    return epoll_create1(0);
+}
+inline bool sy_vigia_vigilar(int64_t V, int64_t Fd) {
+    epoll_event Ev{};
+    Ev.events = EPOLLIN;
+    Ev.data.fd = (int)Fd;
+    return epoll_ctl((int)V, EPOLL_CTL_ADD, (int)Fd, &Ev) == 0;
+}
+inline int64_t sy_vigia_esperar(int64_t V, int64_t TimeoutMs) {
+    epoll_event Ev{};
+    int N = epoll_wait((int)V, &Ev, 1, (int)TimeoutMs);
+    if (N <= 0) return -1;
+    return Ev.data.fd;
+}
+inline bool sy_net_listo(int64_t Fd, int64_t Ms) {
+    pollfd P{};
+    P.fd = (int)Fd;
+    P.events = POLLIN;
+    int R = poll(&P, 1, (int)Ms);
+    return R > 0 && (P.revents & POLLIN);
 }
 #include <arpa/inet.h>
 #include <netdb.h>

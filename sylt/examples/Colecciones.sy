@@ -1,4 +1,3 @@
-
 fn MinMax(A: int, B: int) -> (int, int):
     if A < B:
         return (A, B)
@@ -23,4 +22,3 @@ fn Main():
 
     let (Menor, Mayor) = MinMax(14, 7)
     Print("entre 14 y 7: min={Menor}, max={Mayor}")
-

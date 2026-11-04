@@ -9,4 +9,3 @@ fn Main():
     var C = Caja(Oro: 10)
     let N = Roba(&C, &C)
     Print("oro: {N}")
-

@@ -1,0 +1,351 @@
+import std.str
+import std.io
+
+enum JsonValor:
+    Nulo
+    Logico(b: bool)
+    Numero(n: float)
+    Texto(s: string)
+    Lista(items: [JsonValor])
+    Objeto(pares: { string: JsonValor })
+
+type Lector:
+    Chars: [string]
+    Pos: int = 0
+    Prof: int = 0
+
+    fn Queda(self) -> bool:
+        return self.Pos < self.Chars.Len()
+
+    fn Actual(self) -> string:
+        if not self.Queda():
+            return ""
+        return self.Chars[self.Pos]
+
+    fn Avanza(mut self):
+        self.Pos += 1
+
+    fn Espacio(mut self):
+        while self.Queda():
+            let C = self.Actual()
+            if C == " " or C == "\t" or C == "\n" or C == "\r":
+                self.Avanza()
+            else:
+                break
+
+    fn Espera(mut self, C: string) -> (bool, string):
+        self.Espacio()
+        if self.Actual() != C:
+            return (false, "se esperaba '" + C + "'")
+        self.Avanza()
+        return (true, "")
+
+    fn Fija(mut self, Esperada: string, Res: JsonValor) -> (bool, string, JsonValor):
+        self.Espacio()
+        let L = std.str.Len(Esperada)
+        var I = 0
+        while I < L:
+            if self.Actual() != std.str.Subcadena(Esperada, I, 1):
+                return (false, "se esperaba '" + Esperada + "'", JsonValor.Nulo())
+            self.Avanza()
+            I += 1
+        return (true, "", Res)
+
+    fn Hex(mut self) -> (bool, string, int):
+        var V = 0
+        var N = 0
+        while N < 4:
+            if not self.Queda():
+                return (false, "\\u incompleto", 0)
+            let C = self.Actual()
+            var D = -1
+            if C >= "0" and C <= "9":
+                D = std.str.Codigo(C) - 48
+            elif C >= "a" and C <= "f":
+                D = std.str.Codigo(C) - 87
+            elif C >= "A" and C <= "F":
+                D = std.str.Codigo(C) - 55
+            else:
+                return (false, "\\u necesita cuatro dígitos hexadecimales", 0)
+            V = V * 16 + D
+            self.Avanza()
+            N += 1
+        return (true, "", V)
+
+    fn Unicode(mut self) -> (bool, string, int):
+        let (OkH, ErrH, V) = self.Hex()
+        if not OkH:
+            return (false, ErrH, 0)
+        if V >= 55296 and V <= 56319:
+            if self.Actual() != "\\":
+                return (false, "surrogado alto sin pareja", 0)
+            self.Avanza()
+            if self.Actual() != "u":
+                return (false, "surrogado alto sin pareja", 0)
+            self.Avanza()
+            let (OkB, ErrB, V2) = self.Hex()
+            if not OkB:
+                return (false, ErrB, 0)
+            if V2 < 56320 or V2 > 57343:
+                return (false, "surrogado bajo esperado tras surrogado alto", 0)
+            return (true, "", 65536 + (V - 55296) * 1024 + (V2 - 56320))
+        if V >= 56320 and V <= 57343:
+            return (false, "surrogado bajo sin pareja", 0)
+        return (true, "", V)
+
+    fn Cadena(mut self) -> (bool, string, string):
+        self.Espacio()
+        if self.Actual() != "\"":
+            return (false, "se esperaba un texto entre comillas", "")
+        self.Avanza()
+        var R = ""
+        while self.Queda():
+            let C = self.Actual()
+            self.Avanza()
+            if C == "\"":
+                return (true, "", R)
+            if C == "\\":
+                if not self.Queda():
+                    return (false, "escape sin carácter detrás", "")
+                let E = self.Actual()
+                self.Avanza()
+                if E == "\"":
+                    R += "\""
+                elif E == "\\":
+                    R += "\\"
+                elif E == "/":
+                    R += "/"
+                elif E == "n":
+                    R += "\n"
+                elif E == "t":
+                    R += "\t"
+                elif E == "r":
+                    R += "\r"
+                elif E == "b":
+                    R += std.str.DesdeCodigo(8)
+                elif E == "f":
+                    R += std.str.DesdeCodigo(12)
+                elif E == "u":
+                    let (OkU, ErrU, Cod) = self.Unicode()
+                    if not OkU:
+                        return (false, ErrU, "")
+                    R += std.str.DesdeCodigo(Cod)
+                else:
+                    return (false, "escape desconocido: \"\\" + E + "\"", "")
+            else:
+                R += C
+        return (false, "el texto no se cierra con comillas", "")
+
+    fn NumeroVal(mut self) -> (bool, string, float):
+        self.Espacio()
+        var Partes: [string] = []
+        var Digitos = 0
+        var Puntos = 0
+        var Exps = 0
+        var SimboloUltimo = false
+        while self.Queda():
+            let C = self.Actual()
+            var EsDigito = false
+            if C >= "0" and C <= "9":
+                EsDigito = true
+                Digitos += 1
+                SimboloUltimo = false
+            elif C == ".":
+                if Puntos > 0 or Exps > 0:
+                    return (false, "número mal formado", 0.0)
+                Puntos += 1
+                SimboloUltimo = true
+            elif C == "e" or C == "E":
+                if Exps > 0 or Digitos == 0:
+                    return (false, "número mal formado", 0.0)
+                Exps += 1
+                SimboloUltimo = true
+            elif C == "-" or C == "+":
+                if Partes.Len() == 0:
+                    if C == "+":
+                        break
+                    SimboloUltimo = true
+                elif Partes[Partes.Len() - 1] == "e" or Partes[Partes.Len() - 1] == "E":
+                    SimboloUltimo = true
+                else:
+                    break
+            else:
+                break
+            Partes.Push(C)
+            self.Avanza()
+        if Digitos == 0:
+            return (false, "se esperaba un número", 0.0)
+        if SimboloUltimo:
+            return (false, "número mal formado", 0.0)
+        return (true, "", std.str.AFloat(std.str.Unir(Partes, "")))
+
+    fn ListaVal(mut self) -> (bool, string, [JsonValor]):
+        var Items: [JsonValor] = []
+        let (OkA, ErrA) = self.Espera("[")
+        if not OkA:
+            return (false, ErrA, Items)
+        self.Espacio()
+        if self.Actual() == "]":
+            self.Avanza()
+            return (true, "", Items)
+        while self.Queda():
+            let (OkV, ErrV, V) = self.Valor()
+            if not OkV:
+                return (false, ErrV, Items)
+            Items.Push(V)
+            self.Espacio()
+            if self.Actual() == ",":
+                self.Avanza()
+            elif self.Actual() == "]":
+                self.Avanza()
+                return (true, "", Items)
+            else:
+                return (false, "se esperaba ',' o ']'", Items)
+        return (false, "la lista no se cierra con ']'", Items)
+
+    fn ObjetoVal(mut self) -> (bool, string, { string: JsonValor }):
+        var Pares: { string: JsonValor } = {}
+        let (OkA, ErrA) = self.Espera("{{")
+        if not OkA:
+            return (false, ErrA, Pares)
+        self.Espacio()
+        if self.Actual() == "}":
+            self.Avanza()
+            return (true, "", Pares)
+        while self.Queda():
+            let (OkK, ErrK, K) = self.Cadena()
+            if not OkK:
+                return (false, ErrK, Pares)
+            let (OkD, ErrD) = self.Espera(":")
+            if not OkD:
+                return (false, ErrD, Pares)
+            let (OkV, ErrV, V) = self.Valor()
+            if not OkV:
+                return (false, ErrV, Pares)
+            Pares[K] = V
+            self.Espacio()
+            if self.Actual() == ",":
+                self.Avanza()
+            elif self.Actual() == "}":
+                self.Avanza()
+                return (true, "", Pares)
+            else:
+                return (false, "se esperaba ',' o '}}'", Pares)
+        return (false, "el objeto no se cierra con '}}'", Pares)
+
+    fn Valor(mut self) -> (bool, string, JsonValor):
+        self.Espacio()
+        self.Prof += 1
+        var R = (false, "", JsonValor.Nulo())
+        if self.Prof > 64:
+            R = (false, "demasiado anidado (máximo 64 niveles)", JsonValor.Nulo())
+        else:
+            let C = self.Actual()
+            if C == "{{":
+                let (Ok, Err, P) = self.ObjetoVal()
+                if Ok:
+                    R = (true, "", JsonValor.Objeto(P))
+                else:
+                    R = (false, Err, JsonValor.Nulo())
+            elif C == "[":
+                let (Ok, Err, It) = self.ListaVal()
+                if Ok:
+                    R = (true, "", JsonValor.Lista(It))
+                else:
+                    R = (false, Err, JsonValor.Nulo())
+            elif C == "\"":
+                let (Ok, Err, S) = self.Cadena()
+                if Ok:
+                    R = (true, "", JsonValor.Texto(S))
+                else:
+                    R = (false, Err, JsonValor.Nulo())
+            elif C == "t":
+                R = self.Fija("true", JsonValor.Logico(true))
+            elif C == "f":
+                R = self.Fija("false", JsonValor.Logico(false))
+            elif C == "n":
+                R = self.Fija("null", JsonValor.Nulo())
+            elif C == "-" or (C >= "0" and C <= "9"):
+                let (Ok, Err, N) = self.NumeroVal()
+                if Ok:
+                    R = (true, "", JsonValor.Numero(N))
+                else:
+                    R = (false, Err, JsonValor.Nulo())
+            else:
+                R = (false, "valor inesperado: '" + C + "'", JsonValor.Nulo())
+        self.Prof -= 1
+        return R
+
+fn Parse(TextoJson: string) -> (bool, string, JsonValor):
+    var L = Lector(Chars: std.str.Caracteres(TextoJson))
+    let (Ok, Err, V) = L.Valor()
+    if not Ok:
+        return (false, "posición " + Str(L.Pos) + ": " + Err, JsonValor.Nulo())
+    L.Espacio()
+    if L.Queda():
+        return (false, "posición " + Str(L.Pos) + ": sobra contenido tras el valor",
+            JsonValor.Nulo())
+    return (true, "", V)
+
+fn DeArchivo(Ruta: string) -> (bool, string, JsonValor):
+    if not std.io.Existe(Ruta):
+        return (false, "no existe el archivo " + Ruta, JsonValor.Nulo())
+    return Parse(std.io.LeerArchivo(Ruta))
+
+fn Hex2(N: int) -> string:
+    let D = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+    return D[N / 16] + D[N % 16]
+
+fn Escapar(S: string) -> string:
+    var R = ""
+    for C in std.str.Caracteres(S):
+        if C == "\"":
+            R += "\\\""
+        elif C == "\\":
+            R += "\\\\"
+        elif C == "\n":
+            R += "\\n"
+        elif C == "\r":
+            R += "\\r"
+        elif C == "\t":
+            R += "\\t"
+        else:
+            let Cod = std.str.Codigo(C)
+            if Cod < 32:
+                R += "\\u00" + Hex2(Cod)
+            else:
+                R += C
+    return R
+
+fn NumeroTexto(N: float) -> string:
+    if N != N:
+        return "null"
+    if N > 1.79e308 or N < -1.79e308:
+        return "null"
+    return Str(N)
+
+fn Texto(V: JsonValor) -> string:
+    match V:
+        case Nulo:
+            return "null"
+        case Logico(B):
+            if B:
+                return "true"
+            return "false"
+        case Numero(N):
+            return NumeroTexto(N)
+        case Texto(S):
+            return "\"" + Escapar(S) + "\""
+        case Lista(Items):
+            var Partes: [string] = []
+            for X in Items:
+                Partes.Push(Texto(X))
+            return "[" + std.str.Unir(Partes, ",") + "]"
+        case Objeto(Pares):
+            var Partes: [string] = []
+            for K in Pares:
+                Partes.Push("\"" + Escapar(K) + "\":" + Texto(Pares[K]))
+            return "{{" + std.str.Unir(Partes, ",") + "}}"
+
+fn HaciaArchivo(V: JsonValor, Ruta: string):
+    std.io.EscribirArchivo(Ruta, Texto(V))

@@ -7,4 +7,3 @@ fn Main():
     let D = C
     Print("D = {D.Marca}")
     Print("C = {C.Marca}")
-

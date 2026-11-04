@@ -39,30 +39,37 @@ Palette Palette::Make(bool color) {
     };
 }
 void Reporter::Emit(const Diag& d) {
+    if (Sink) {
+        if (d.Severity == Diag::Sev::Error) Errors++;
+        else Warnings++;
+        Sink->push_back(d);
+        return;
+    }
     Palette P = Palette::Make(Color);
     const SourceFile& F = d.File ? *d.File : Src;
+    FILE* out = (d.Severity == Diag::Sev::Warning) ? stderr : stdout;
     const char* sev = (d.Severity == Diag::Sev::Error) ? "error" : "aviso";
     std::string col = (d.Severity == Diag::Sev::Error) ? P.Err : P.Warn;
     if (d.PrimaryValid) {
-        std::printf("%s%s[%s]%s: %s\n", col.c_str(), sev, d.Code.c_str(),
-                    P.Reset.c_str(), d.Msg.c_str());
+        std::fprintf(out, "%s%s[%s]%s: %s\n", col.c_str(), sev, d.Code.c_str(),
+                     P.Reset.c_str(), d.Msg.c_str());
         Diag::Note primary{Diag::NoteKind::Primary, "", d.Primary};
-        RenderBox(F, primary);
+        RenderBox(F, primary, out);
         for (const auto& n : d.Notes) {
-            std::printf("%snota:%s %s\n", P.Note.c_str(), P.Reset.c_str(), n.Text.c_str());
-            RenderBox(F, n);
+            std::fprintf(out, "%snota:%s %s\n", P.Note.c_str(), P.Reset.c_str(), n.Text.c_str());
+            RenderBox(F, n, out);
         }
     } else {
-        std::printf("%s%s[%s]%s: %s\n", col.c_str(), sev, d.Code.c_str(),
-                    P.Reset.c_str(), d.Msg.c_str());
+        std::fprintf(out, "%s%s[%s]%s: %s\n", col.c_str(), sev, d.Code.c_str(),
+                     P.Reset.c_str(), d.Msg.c_str());
     }
     for (const auto& h : d.Helps) {
-        std::printf("%sayuda:%s %s\n", P.Help.c_str(), P.Reset.c_str(), h.c_str());
+        std::fprintf(out, "%sayuda:%s %s\n", P.Help.c_str(), P.Reset.c_str(), h.c_str());
     }
-    std::printf("\n");
+    std::fprintf(out, "\n");
     if (d.Severity == Diag::Sev::Error) Errors++; else Warnings++;
 }
-void Reporter::RenderBox(const SourceFile& F, const Diag::Note& n) const {
+void Reporter::RenderBox(const SourceFile& F, const Diag::Note& n, FILE* out) const {
     Palette P = Palette::Make(Color);
     if (!n.Sp.Line || n.Sp.Line > (int)F.Lines.size()) return;
     int ln = n.Sp.Line;
@@ -71,11 +78,11 @@ void Reporter::RenderBox(const SourceFile& F, const Diag::Note& n) const {
     std::snprintf(numbuf, sizeof(numbuf), "%d", ln);
     std::string num(numbuf);
     std::string gutter = std::string(num.size(), ' ');
-    std::printf("%s  ┌─ %s:%d:%d%s\n", P.Dim.c_str(), F.Name.c_str(), ln, n.Sp.Col,
-                P.Reset.c_str());
-    std::printf("%s  │%s\n", P.Dim.c_str(), P.Reset.c_str());
-    std::printf(" %s %s│ %s%s\n", num.c_str(), P.Dim.c_str(), P.Reset.c_str(),
-                line.c_str());
+    std::fprintf(out, "%s  ┌─ %s:%d:%d%s\n", P.Dim.c_str(), F.Name.c_str(), ln, n.Sp.Col,
+                 P.Reset.c_str());
+    std::fprintf(out, "%s  │%s\n", P.Dim.c_str(), P.Reset.c_str());
+    std::fprintf(out, " %s %s│ %s%s\n", num.c_str(), P.Dim.c_str(), P.Reset.c_str(),
+                 line.c_str());
     int col = n.Sp.Col >= 1 ? n.Sp.Col : 1;
     int len = n.Sp.Len > 0 ? n.Sp.Len : 1;
     if (len < 1) len = 1;
@@ -85,9 +92,9 @@ void Reporter::RenderBox(const SourceFile& F, const Diag::Note& n) const {
     std::string pad((size_t)(dcol - 1), ' ');
     std::string carets((size_t)dlen, '^');
     std::string label = n.Text.empty() ? "" : " " + n.Text;
-    std::printf(" %s %s│ %s%s%s%s%s%s\n", gutter.c_str(), P.Dim.c_str(), P.Reset.c_str(),
-                pad.c_str(), P.Caret.c_str(), carets.c_str(), P.Reset.c_str(),
-                label.c_str());
-    std::printf("%s  │%s\n", P.Dim.c_str(), P.Reset.c_str());
+    std::fprintf(out, " %s %s│ %s%s%s%s%s%s\n", gutter.c_str(), P.Dim.c_str(), P.Reset.c_str(),
+                 pad.c_str(), P.Caret.c_str(), carets.c_str(), P.Reset.c_str(),
+                 label.c_str());
+    std::fprintf(out, "%s  │%s\n", P.Dim.c_str(), P.Reset.c_str());
 }
 }

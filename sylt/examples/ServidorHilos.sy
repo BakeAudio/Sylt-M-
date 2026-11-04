@@ -1,0 +1,68 @@
+import std.net
+import std.str
+import std.time
+import std.hilo
+
+fn TextoEstado(Codigo: int) -> string:
+    match Codigo:
+        case 200:
+            return "OK"
+        case 400:
+            return "Peticion incorrecta"
+        case 404:
+            return "No encontrado"
+        case _:
+            return "?"
+
+fn Responder(Cliente: int, Codigo: int, Tipo: string, Cuerpo: string, Mantener: bool):
+    var Conexion = "close"
+    if Mantener:
+        Conexion = "keep-alive"
+    let Cabecera = "HTTP/1.1 " + Str(Codigo) + " " + TextoEstado(Codigo) +
+        "\r\nContent-Type: " + Tipo +
+        "\r\nContent-Length: " + Str(Cuerpo.Len()) +
+        "\r\nConnection: " + Conexion + "\r\n\r\n"
+    std.net.TcpEnviar(Cliente, Cabecera + Cuerpo)
+
+fn Atender(Cliente: int, Direccion: string):
+    while true:
+        let Peticion = std.net.TcpRecibir(Cliente, 65536)
+        if Peticion.Len() == 0:
+            break
+        let FinLinea = std.str.Buscar(Peticion, "\r\n")
+        let Linea = std.str.Subcadena(Peticion, 0, FinLinea)
+        let Partes = std.str.Dividir(Linea, " ")
+        Print("[{Direccion}] {Linea}")
+        var Cerrar = std.str.Buscar(Peticion, "Connection: close") >= 0
+        if std.str.Buscar(Peticion, "HTTP/1.0") >= 0:
+            Cerrar = true
+        if Partes.Len() < 2:
+            Responder(Cliente, 400, "text/plain; charset=utf-8", "peticion malformada", false)
+            break
+        let Ruta = Partes[1]
+        if Ruta == "/":
+            Responder(Cliente, 200, "text/html; charset=utf-8",
+                "<h1>Servidor con hilos en Sylt</h1><p>prueba <a href=\"/saludo\">/saludo</a> y <a href=\"/lento\">/lento</a></p>",
+                not Cerrar)
+        elif Ruta == "/saludo":
+            Responder(Cliente, 200, "text/plain; charset=utf-8", "¡Hola desde Sylt!",
+                not Cerrar)
+        elif Ruta == "/lento":
+            std.hilo.Dormir(800)
+            Responder(Cliente, 200, "text/plain; charset=utf-8",
+                "terminé de esperar 800 ms", not Cerrar)
+        else:
+            Responder(Cliente, 404, "text/plain; charset=utf-8", "no conozco la ruta {Ruta}",
+                not Cerrar)
+        if Cerrar:
+            break
+    std.net.TcpCerrar(Cliente)
+
+fn Main():
+    let Servidor = std.net.TcpEscuchar(8081)
+    Print("Servidor Sylt con hilos escuchando en http://127.0.0.1:8081")
+    Print("(Ctrl+C para parar)")
+    while true:
+        let Cliente = std.net.TcpAceptar(Servidor)
+        let Dir = std.net.TcpDireccion(Cliente)
+        HiloLanzar(Atender, Cliente, Dir)

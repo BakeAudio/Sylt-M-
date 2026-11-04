@@ -20,6 +20,7 @@ public:
     std::unordered_map<std::string, TypeDecl*> TypeByName;
     std::unordered_map<std::string, EnumDecl*> EnumByName;
     std::unordered_map<std::string, FnDecl*> FnByName;
+    std::unordered_map<std::string, FnDecl*> ForeignDecls;
     std::unordered_map<std::string, std::string> QualNames;
     std::unordered_map<std::string, std::string> VarPtr;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> EnumFieldPos;
@@ -27,6 +28,11 @@ public:
     std::vector<std::pair<std::string, std::string>> LoopStack;
     Type RetType;
     std::string CurModule;
+    std::unordered_map<std::string, std::string> TupleNames;
+    std::unordered_map<std::string, std::string> CollStr;
+    std::vector<std::pair<Type, int>> PendColl;
+    int TupleN = 0;
+    std::vector<std::pair<std::string, std::string>> Allos;
 
     explicit G(ProgramP& prog, const GenOptions& opt) : Prog(prog), Opt(opt) {
         for (auto& td : Prog->Types) {
@@ -39,7 +45,10 @@ public:
             EnumByName[key] = ed.get();
             if (!ed->Module.empty()) QualNames[ed->Module + "." + ed->Name] = key;
         }
-        for (auto& fd : Prog->Fns) FnByName[Key(fd->Module, fd->Name)] = fd.get();
+        for (auto& fd : Prog->Fns) {
+            FnByName[Key(fd->Module, fd->Name)] = fd.get();
+            if (fd->Foreign) ForeignDecls[fd->Name] = fd.get();
+        }
     }
 
     static std::string Key(const std::string& mod, const std::string& n) {
@@ -113,18 +122,101 @@ public:
             case TK::Bool: return "i1";
             case TK::Str: return "ptr";
             case TK::Void: return "void";
-            case TK::Struct: return "%" + CppId(t.Name);
-            case TK::Enum: return "%" + CppId(t.Name);
+            case TK::Struct: return "%" + CppId(Canoniza(t.Name));
+            case TK::Enum: return "%" + CppId(Canoniza(t.Name));
             case TK::Borrow: return LT(t.Pointee(), sp);
-            case TK::Array:
-                throw Unsupported{sp, "los arrays no están soportados todavía por el backend llvm"};
-            case TK::Map:
-                throw Unsupported{sp, "los mapas no están soportados todavía por el backend llvm"};
-            case TK::Tuple:
-                throw Unsupported{sp, "las tuplas no están soportadas todavía por el backend llvm"};
+            case TK::Array: return "ptr";
+            case TK::Map: return "ptr";
+            case TK::Tuple: return "%" + TupleType(t, sp);
             default:
                 throw Unsupported{sp, "este tipo no está soportado por el backend llvm"};
         }
+    }
+
+    std::string Canoniza(const std::string& n) {
+        if (n.find("__") != std::string::npos) return n;
+        if (!CurModule.empty()) {
+            std::string m = CurModule;
+            for (auto& c : m)
+                if (c == '.') c = '_';
+            std::string k = m + "__" + n;
+            if (TypeByName.count(k) || EnumByName.count(k)) return k;
+        }
+        return n;
+    }
+
+    std::string ShapeKey(const Type& t) {
+        switch (t.K) {
+            case TK::Int: return "i64";
+            case TK::Float: return "f64";
+            case TK::Bool: return "i1";
+            case TK::Str: return "str";
+            case TK::Array: return "a" + ShapeKey(t.Sub[0]);
+            case TK::Map: return "m" + ShapeKey(t.Sub[0]) + ShapeKey(t.Sub[1]);
+            case TK::Tuple: {
+                std::string s = "t";
+                for (auto& e : t.Sub) s += ShapeKey(e);
+                return s;
+            }
+            default: return CppId(Canoniza(t.Name));
+        }
+    }
+
+    std::string TupleType(const Type& t, const Span& sp) {
+        std::string key = ShapeKey(t);
+        auto it = TupleNames.find(key);
+        if (it != TupleNames.end()) return it->second;
+        std::string name = "sylt.t." + std::to_string(TupleN++);
+        TupleNames[key] = name;
+        std::string s = "%" + name + " = type { ";
+        for (size_t i = 0; i < t.Sub.size(); i++) {
+            if (i) s += ", ";
+            s += LT(t.Sub[i], sp);
+        }
+        Ts << s + " }\n";
+        return name;
+    }
+
+    std::string TypeSize(const Type& t, const Span& sp) {
+        if (t.IsInt() || t.IsFloat()) return "8";
+        if (t.IsBool()) return "1";
+        if (t.IsStr() || t.IsArray() || t.IsMap()) return "8";
+        std::string lt = LT(t, sp);
+        std::string g = N(), r = N();
+        I(g + " = getelementptr " + lt + ", ptr null, i64 1");
+        I(r + " = ptrtoint ptr " + g + " to i64");
+        return r;
+    }
+
+    std::string AllocaT(const std::string& lt) {
+        std::string r = N();
+        Allos.push_back({lt, r});
+        return r;
+    }
+
+    std::string Junta() {
+        std::string allo;
+        for (auto& a : Allos) allo += "  " + a.second + " = alloca " + a.first + "\n";
+        Allos.clear();
+        std::string text;
+        for (size_t i = 0; i < Blocks.size(); i++) {
+            if (!Blocks[i].first.empty()) text += Blocks[i].first + ":\n";
+            if (i == 0 && !allo.empty()) text += allo;
+            text += Blocks[i].second;
+            if (!Closed[i]) text += "  unreachable\n";
+        }
+        return text;
+    }
+
+    std::string BaseName(Expr* e) {
+        Expr* r = e;
+        while (r->K == Expr::Kind::Member || r->K == Expr::Kind::Index) {
+            r = (r->K == Expr::Kind::Member)
+                    ? static_cast<MemberExpr*>(r)->Base.get()
+                    : static_cast<IndexExpr*>(r)->Base.get();
+        }
+        if (r->K == Expr::Kind::Ident) return static_cast<IdentExpr*>(r)->Name;
+        return "expresión";
     }
 
     void LetBind(const std::string& name, const std::string& ptr) {
@@ -222,11 +314,134 @@ public:
         else if (t.IsBool()) I(r + " = call ptr @sylt.bool_str(i1 " + reg + ")");
         else if (t.IsStruct() || t.IsEnum()) {
             std::string tid = CppId(t.Name);
-            std::string tmp = N();
-            I(tmp + " = alloca %" + tid);
+            std::string tmp = AllocaT("%" + tid);
             I("store %" + tid + " " + reg + ", ptr " + tmp);
             I(r + " = call ptr @sylt.str_of__" + tid + "(ptr " + tmp + ")");
+        } else if (t.IsArray()) {
+            std::string fn = CollStrFn(t, 0);
+            I(r + " = call ptr @" + fn + "(ptr " + reg + ")");
+        } else if (t.IsMap()) {
+            std::string fn = CollStrFn(t, 1);
+            I(r + " = call ptr @" + fn + "(ptr " + reg + ")");
         } else throw Unsupported{Span(), "no puedo convertir este valor a texto en el backend llvm"};
+        return r;
+    }
+
+    std::string CollStrFn(const Type& t, int kind) {
+        std::string key = (kind == 0 ? "a:" : "m:") + ShapeKey(t);
+        auto it = CollStr.find(key);
+        if (it != CollStr.end()) return it->second;
+        std::string fn = "sylt.coll_str." + std::to_string(CollStr.size());
+        CollStr[key] = fn;
+        PendColl.push_back({t, kind});
+        return fn;
+    }
+
+    std::string DatoATexto(const std::string& slot, const Type& t, const Span& sp) {
+        if (t.IsStr()) {
+            std::string h = N();
+            I(h + " = load ptr, ptr " + slot);
+            return h;
+        }
+        if (t.IsArray() || t.IsMap()) return ToStrVal(slot, t);
+        if (t.IsStruct() || t.IsEnum()) {
+            std::string s = N();
+            I(s + " = load " + LT(t, sp) + ", ptr " + slot);
+            return ToStrVal(s, t);
+        }
+        std::string v = N();
+        I(v + " = load " + LT(t, sp) + ", ptr " + slot);
+        return ToStrVal(v, t);
+    }
+
+    void EmitCollStr(const Type& t, int kind) {
+        std::string fn = CollStrFn(t, kind);
+        Blocks.clear();
+        Closed.clear();
+        LoopStack.clear();
+        Undo.clear();
+        VarPtr.clear();
+        Open("");
+        std::string acc = AllocaT("ptr");
+        std::string ini = StrLit(kind == 0 ? "[" : "{");
+        I("store ptr " + ini + ", ptr " + acc);
+        std::string len = N();
+        I(len + " = call i64 @" + (kind == 0 ? "sy_arr_len" : "sy_map_len") + "(ptr %a0)");
+        std::string iv = AllocaT("i64");
+        I("store i64 0, ptr " + iv);
+        std::string head = Lbl("cs"), body = Lbl("csbody"), step = Lbl("csstep"), end = Lbl("csend");
+        Term("br label %" + head);
+        Open(head);
+        std::string v1 = N(), c1 = N();
+        I(v1 + " = load i64, ptr " + iv);
+        I(c1 + " = icmp slt i64 " + v1 + ", " + len);
+        Term("br i1 " + c1 + ", label %" + body + ", label %" + end);
+        Open(body);
+        std::string v2 = N();
+        I(v2 + " = load i64, ptr " + iv);
+        std::string sep;
+        if (kind == 0) {
+            Type et = t.Sub[0];
+            std::string sz = TypeSize(et, Span());
+            std::string slot = N();
+            I(slot + " = call ptr @sy_arr_slot(ptr %a0, i64 " + v2 + ", i64 " + sz +
+              ", ptr " + StrConst("colección") + ")");
+            std::string txt = DatoATexto(slot, et, Span());
+            std::string c2 = N(), se = N();
+            I(c2 + " = icmp eq i64 " + v2 + ", 0");
+            I(se + " = select i1 " + c2 + ", ptr " + StrLit("") + ", ptr " + StrLit(", "));
+            std::string t1 = N();
+            I(t1 + " = call ptr @sylt.str_concat(ptr " + sepload(acc) + ", ptr " + se + ")");
+            std::string t2 = N();
+            I(t2 + " = call ptr @sylt.str_concat(ptr " + t1 + ", ptr " + txt + ")");
+            I("store ptr " + t2 + ", ptr " + acc);
+        } else {
+            Type kt = t.Sub[0], vt = t.Sub[1];
+            std::string vsz = TypeSize(vt, Span());
+            std::string ktxt;
+            if (kt.IsStr()) {
+                std::string kh = N();
+                I(kh + " = call ptr @sy_map_clave_str(ptr %a0, i64 " + v2 + ")");
+                ktxt = kh;
+            } else {
+                std::string kv = N();
+                I(kv + " = call i64 @sy_map_clave_int(ptr %a0, i64 " + v2 + ")");
+                ktxt = ToStrVal(kv, kt);
+            }
+            std::string vp = N();
+            I(vp + " = call ptr @sy_map_valor(ptr %a0, i64 " + v2 + ", i64 " + vsz + ")");
+            std::string vtxt = DatoATexto(vp, vt, Span());
+            std::string c2 = N(), se = N();
+            I(c2 + " = icmp eq i64 " + v2 + ", 0");
+            I(se + " = select i1 " + c2 + ", ptr " + StrLit("") + ", ptr " + StrLit(", "));
+            std::string t1 = N();
+            I(t1 + " = call ptr @sylt.str_concat(ptr " + sepload(acc) + ", ptr " + se + ")");
+            std::string t2 = N();
+            I(t2 + " = call ptr @sylt.str_concat(ptr " + t1 + ", ptr " + ktxt + ")");
+            std::string t3 = N();
+            I(t3 + " = call ptr @sylt.str_concat(ptr " + t2 + ", ptr " + StrLit(": ") + ")");
+            std::string t4 = N();
+            I(t4 + " = call ptr @sylt.str_concat(ptr " + t3 + ", ptr " + vtxt + ")");
+            I("store ptr " + t4 + ", ptr " + acc);
+        }
+        Term("br label %" + step);
+        Open(step);
+        std::string v3 = N(), v4 = N();
+        I(v3 + " = load i64, ptr " + iv);
+        I(v4 + " = add i64 " + v3 + ", 1");
+        I("store i64 " + v4 + ", ptr " + iv);
+        Term("br label %" + head);
+        Open(end);
+        std::string fin = N();
+        I(fin + " = call ptr @sylt.str_concat(ptr " + sepload(acc) + ", ptr " +
+          StrLit(kind == 0 ? "]" : "}") + ")");
+        Term("ret ptr " + fin);
+        Bs << "define private ptr @" << fn << "(ptr %a0) {\n" << Junta() << "}\n\n";
+    }
+
+    std::string sepload(const std::string& acc) {
+        std::string r = N();
+        I(r + " = load ptr, ptr " + acc);
         return r;
     }
 
@@ -248,19 +463,54 @@ public:
             if (!bt.IsStruct())
                 throw Unsupported{m->Sp, "no puedo acceder a campos de este valor en el backend llvm"};
             LVal b = GenLval(m->Base.get());
-            auto f = TypeByName.find(bt.Name);
+            auto f = TypeByName.find(Canoniza(bt.Name));
             if (f == TypeByName.end())
                 throw Unsupported{m->Sp, "tipo desconocido en el backend llvm"};
             int idx = FieldIndex(f->second, m->Name);
             std::string r = N();
-            I(r + " = getelementptr inbounds %" + CppId(bt.Name) + ", ptr " + b.Ptr +
+            I(r + " = getelementptr inbounds %" + CppId(Canoniza(bt.Name)) + ", ptr " + b.Ptr +
               ", i32 0, i32 " + std::to_string(idx));
             return {r, m->Ty};
         }
+        if (e->K == Expr::Kind::Index) {
+            auto* ix = static_cast<IndexExpr*>(e);
+            if (ix->TupleIndex) {
+                LVal b = GenLval(ix->Base.get());
+                std::string tn = TupleType(ix->Base->Ty, ix->Sp);
+                std::string r = N();
+                I(r + " = getelementptr inbounds %" + tn + ", ptr " + b.Ptr +
+                  ", i32 0, i32 " + std::to_string(ix->TuplePos));
+                return {r, e->Ty};
+            }
+            Type bt = ix->Base->Ty.Pointee();
+            RVal b = GenExpr(ix->Base.get());
+            RVal iv = GenExpr(ix->Idx.get());
+            std::string nom = StrConst(BaseName(ix->Base.get()));
+            if (bt.IsArray()) {
+                Type et = bt.Sub[0];
+                std::string sz = TypeSize(et, ix->Sp);
+                std::string slot = N();
+                I(slot + " = call ptr @sy_arr_slot(ptr " + b.V + ", i64 " + iv.V + ", i64 " +
+                  sz + ", ptr " + nom + ")");
+                return {slot, et};
+            }
+            if (bt.IsMap()) {
+                Type kt = bt.Sub[0], vt = bt.Sub[1];
+                std::string vsz = TypeSize(vt, ix->Sp);
+                std::string slot = N();
+                if (kt.IsStr())
+                    I(slot + " = call ptr @sy_map_slot_ins_str(ptr " + b.V + ", ptr " + iv.V +
+                      ", i64 " + vsz + ")");
+                else
+                    I(slot + " = call ptr @sy_map_slot_ins_int(ptr " + b.V + ", i64 " + iv.V +
+                      ", i64 " + vsz + ")");
+                return {slot, vt};
+            }
+            throw Unsupported{ix->Sp, "no puedo asignar a este índice en el backend llvm"};
+        }
         if (e->K == Expr::Kind::Call) {
             RVal v = GenExpr(e);
-            std::string t = N();
-            I(t + " = alloca " + v.T);
+            std::string t = AllocaT(v.T);
             I("store " + v.T + " " + v.V + ", ptr " + t);
             return {t, e->Ty};
         }
@@ -384,9 +634,68 @@ public:
             case Expr::Kind::Call:
                 return GenCall(static_cast<CallExpr*>(e));
             case Expr::Kind::Index:
-                throw Unsupported{e->Sp,
-                                  "los índices de colecciones no están soportados todavía "
-                                  "por el backend llvm"};
+                return GenIndex(e);
+            case Expr::Kind::ArrayLit: {
+                auto* a = static_cast<ArrayLitExpr*>(e);
+                Type et = a->Ty.Sub[0];
+                std::string sz = TypeSize(et, a->Sp);
+                std::string arr = N();
+                I(arr + " = call ptr @sy_arr_nuevo(i64 " + sz + ")");
+                for (size_t i = 0; i < a->Elems.size(); i++) {
+                    RVal v = GenExpr(a->Elems[i].get());
+                    v = CastVal(v, et);
+                    std::string tmp = AllocaT(LT(et, a->Sp));
+                    I("store " + v.T + " " + v.V + ", ptr " + tmp);
+                    I("call ptr @sy_arr_push(ptr " + arr + ", ptr " + tmp + ", i64 " + sz + ")");
+                }
+                return {"ptr", arr, a->Ty};
+            }
+            case Expr::Kind::MapLit: {
+                auto* m = static_cast<MapLitExpr*>(e);
+                Type kt = m->Ty.Sub[0], vt = m->Ty.Sub[1];
+                int kkind;
+                if (kt.IsStr()) kkind = 0;
+                else if (kt.IsInt()) kkind = 1;
+                else
+                    throw Unsupported{m->Sp,
+                                      "solo hay mapas con claves `string` o `int` en el "
+                                      "backend llvm"};
+                std::string vsz = TypeSize(vt, m->Sp);
+                std::string mp = N();
+                I(mp + " = call ptr @sy_map_nuevo(i64 " + std::to_string(kkind) + ", i64 " +
+                  vsz + ")");
+                for (auto& pr : m->Pairs) {
+                    RVal v = GenExpr(pr.Val.get());
+                    v = CastVal(v, vt);
+                    std::string tmp = AllocaT(LT(vt, m->Sp));
+                    I("store " + v.T + " " + v.V + ", ptr " + tmp);
+                    if (kkind == 0) {
+                        RVal k = GenExpr(pr.Key.get());
+                        I("call ptr @sy_map_pon_str(ptr " + mp + ", ptr " + k.V + ", ptr " +
+                          tmp + ", i64 " + vsz + ")");
+                    } else {
+                        RVal k = GenExpr(pr.Key.get());
+                        I("call ptr @sy_map_pon_int(ptr " + mp + ", i64 " + k.V + ", ptr " +
+                          tmp + ", i64 " + vsz + ")");
+                    }
+                }
+                return {"ptr", mp, m->Ty};
+            }
+            case Expr::Kind::TupleLit: {
+                auto* t = static_cast<TupleLitExpr*>(e);
+                std::string tn = TupleType(t->Ty, t->Sp);
+                std::string tmp = AllocaT("%" + tn);
+                for (size_t i = 0; i < t->Elems.size(); i++) {
+                    RVal v = GenExpr(t->Elems[i].get());
+                    std::string fp = N();
+                    I(fp + " = getelementptr inbounds %" + tn + ", ptr " + tmp + ", i32 0, i32 " +
+                      std::to_string(i));
+                    I("store " + v.T + " " + v.V + ", ptr " + fp);
+                }
+                std::string r = N();
+                I(r + " = load %" + tn + ", ptr " + tmp);
+                return {"%" + tn, r, t->Ty};
+            }
             case Expr::Kind::Member: {
                 auto* m = static_cast<MemberExpr*>(e);
                 if (m->IsEnumUnit) {
@@ -395,8 +704,7 @@ public:
                         throw Unsupported{m->Sp, "enum desconocido en el backend llvm"};
                     int vi = VariantIndex(ed->second, m->Name);
                     std::string eid = CppId(m->EnumKey);
-                    std::string t = N();
-                    I(t + " = alloca %" + eid);
+                    std::string t = AllocaT("%" + eid);
                     I("store %" + eid + " zeroinitializer, ptr " + t);
                     std::string tp = N();
                     I(tp + " = getelementptr inbounds %" + eid + ", ptr " + t +
@@ -404,7 +712,7 @@ public:
                     I("store i64 " + std::to_string(vi) + ", ptr " + tp);
                     std::string r = N();
                     I(r + " = load %" + eid + ", ptr " + t);
-                    return {"%" + m->EnumKey, r, e->Ty};
+                    return {"%" + CppId(m->EnumKey), r, e->Ty};
                 }
                 LVal lv = GenLval(e);
                 std::string lt = LT(e->Ty, e->Sp);
@@ -412,20 +720,58 @@ public:
                 I(r + " = load " + lt + ", ptr " + lv.Ptr);
                 return {lt, r, e->Ty};
             }
-            case Expr::Kind::ArrayLit:
-                throw Unsupported{e->Sp, "los arrays no están soportados todavía por el backend llvm"};
-            case Expr::Kind::MapLit:
-                throw Unsupported{e->Sp, "los mapas no están soportados todavía por el backend llvm"};
-            case Expr::Kind::TupleLit:
-                throw Unsupported{e->Sp, "las tuplas no están soportadas todavía por el backend llvm"};
         }
         throw Unsupported{e->Sp, "expresión no soportada por el backend llvm"};
     }
 
+    RVal GenIndex(Expr* e) {
+        auto* ix = static_cast<IndexExpr*>(e);
+        if (ix->TupleIndex) {
+            LVal lv = GenLval(e);
+            std::string lt = LT(e->Ty, e->Sp);
+            std::string r = N();
+            I(r + " = load " + lt + ", ptr " + lv.Ptr);
+            return {lt, r, e->Ty};
+        }
+        Type bt = ix->Base->Ty.Pointee();
+        RVal b = GenExpr(ix->Base.get());
+        RVal iv = GenExpr(ix->Idx.get());
+        std::string nom = StrConst(BaseName(ix->Base.get()));
+        if (bt.IsArray()) {
+            Type et = bt.Sub[0];
+            std::string sz = TypeSize(et, ix->Sp);
+            std::string slot = N();
+            I(slot + " = call ptr @sy_arr_slot(ptr " + b.V + ", i64 " + iv.V + ", i64 " + sz +
+              ", ptr " + nom + ")");
+            std::string lt = LT(et, ix->Sp);
+            std::string r = N();
+            I(r + " = load " + lt + ", ptr " + slot);
+            return {lt, r, e->Ty};
+        }
+        if (bt.IsMap()) {
+            Type kt = bt.Sub[0], vt = bt.Sub[1];
+            std::string vsz = TypeSize(vt, ix->Sp);
+            std::string slot;
+            if (kt.IsStr()) {
+                slot = N();
+                I(slot + " = call ptr @sy_map_slot_str(ptr " + b.V + ", ptr " + iv.V +
+                  ", i64 " + vsz + ", ptr " + nom + ")");
+            } else {
+                slot = N();
+                I(slot + " = call ptr @sy_map_slot_int(ptr " + b.V + ", i64 " + iv.V +
+                  ", i64 " + vsz + ", ptr " + nom + ")");
+            }
+            std::string lt = LT(vt, ix->Sp);
+            std::string r = N();
+            I(r + " = load " + lt + ", ptr " + slot);
+            return {lt, r, e->Ty};
+        }
+        throw Unsupported{e->Sp, "índice no soportado por el backend llvm"};
+    }
+
     RVal GenLogic(BinaryExpr* b) {
         bool isAnd = (b->Op == "and");
-        std::string t = N();
-        I(t + " = alloca i1");
+        std::string t = AllocaT("i1");
         RVal l = GenExpr(b->L.get());
         I("store i1 " + l.V + ", ptr " + t);
         std::string rhs = Lbl("rhs"), shortc = Lbl("short"), merge = Lbl("merge");
@@ -488,7 +834,7 @@ public:
                 out.push_back({"ptr", lv.Ptr});
                 continue;
             }
-            bool agg = at.IsStruct() || at.IsEnum();
+            bool agg = at.IsStruct() || at.IsEnum() || at.IsTuple();
             if (agg) {
                 LVal lv = GenLval(a.Value.get());
                 out.push_back({"ptr", lv.Ptr});
@@ -516,6 +862,16 @@ public:
                     return {"void", "", Type::Void()};
                 }
                 if (n == "Str") {
+                    if (c->Args.size() == 2) {
+                        RVal v = GenExpr(c->Args[0].Value.get());
+                        if (v.Ty.IsInt()) v = CastVal(v, Type::Float());
+                        RVal d = GenExpr(c->Args[1].Value.get());
+                        std::string r = N();
+                        I(r + " = call ptr @sy_f64_prec(double " + v.V + ", i64 " + d.V + ")");
+                        std::string w = N();
+                        I(w + " = call ptr @sy_str_from_c(ptr " + r + ")");
+                        return {"ptr", w, Type::Str()};
+                    }
                     RVal v = GenExpr(c->Args[0].Value.get());
                     std::string s = ToStrVal(v.V, v.Ty);
                     return {"ptr", s, Type::Str()};
@@ -570,18 +926,59 @@ public:
                     I(out + " = select i1 " + cond + ", i64 " + l.V + ", i64 " + r.V);
                     return {"i64", out, Type::Int()};
                 }
-                if (n == "Clone") return GenExpr(c->Args[0].Value.get());
-                if (n == "Afirma")
-                    throw Unsupported{c->Sp,
-                                      "Afirma no está soportado todavía por el backend llvm "
-                                      "(sí en --backend=cpp)"};
-                if (n == "TiempoMs")
-                    throw Unsupported{c->Sp,
-                                      "TiempoMs no está soportado todavía por el backend llvm"};
+                if (n == "Clone") {
+                    RVal v = GenExpr(c->Args[0].Value.get());
+                    if (v.Ty.IsStr()) {
+                        std::string r = N();
+                        I(r + " = call ptr @sy_str_clona(ptr " + v.V + ")");
+                        return {"ptr", r, v.Ty};
+                    }
+                    if (v.Ty.IsArray()) {
+                        Type et = v.Ty.Sub[0];
+                        std::string sz = TypeSize(et, c->Sp);
+                        std::string es = et.IsStr() ? "1" : "0";
+                        std::string r = N();
+                        I(r + " = call ptr @sy_arr_copia(ptr " + v.V + ", i64 " + sz + ", i1 " +
+                          es + ")");
+                        return {"ptr", r, v.Ty};
+                    }
+                    if (v.Ty.IsMap()) {
+                        Type kt = v.Ty.Sub[0], vt = v.Ty.Sub[1];
+                        std::string kk = kt.IsStr() ? "0" : "1";
+                        std::string vsz = TypeSize(vt, c->Sp);
+                        std::string vs = vt.IsStr() ? "1" : "0";
+                        std::string r = N();
+                        I(r + " = call ptr @sy_map_copia(ptr " + v.V + ", i64 " + kk + ", i64 " +
+                          vsz + ", i1 " + vs + ")");
+                        return {"ptr", r, v.Ty};
+                    }
+                    return v;
+                }
+                if (n == "Afirma") {
+                    RVal cond = GenExpr(c->Args[0].Value.get());
+                    RVal msg = GenExpr(c->Args[1].Value.get());
+                    std::string z = N();
+                    I(z + " = zext i1 " + cond.V + " to i32");
+                    std::string d = N();
+                    I(d + " = getelementptr inbounds %sylt.str, ptr " + msg.V +
+                      ", i32 0, i32 1");
+                    std::string db = N();
+                    I(db + " = load ptr, ptr " + d);
+                    I("call void @sy_afirma(i32 " + z + ", ptr " + db + ", i64 " +
+                      std::to_string(c->Sp.Line) + ")");
+                    return {"void", "", Type::Void()};
+                }
+                if (n == "TiempoMs") {
+                    std::string r = N();
+                    I(r + " = call double @sy_mono_ms()");
+                    return {"double", r, Type::Float()};
+                }
+                if (n == "HiloLanzar") return GenHiloLanzar(c);
                 throw Unsupported{c->Sp, "función integrada no soportada por el backend llvm"};
             }
             case CallExpr::Target::Fn: {
                 auto f = FnByName.find(c->TargetName);
+                if (ForeignDecls.count(c->TargetName)) return GenForeignCall(c);
                 auto args = GenArgs(c);
                 std::string ret = "void";
                 if (f != FnByName.end()) {
@@ -639,7 +1036,7 @@ public:
                 CurModule = "";
                 std::string r = N();
                 I(r + " = load %" + tid + ", ptr " + t);
-                return {"%" + c->TargetName, r, c->Ty};
+                return {"%" + tid, r, c->Ty};
             }
             case CallExpr::Target::StructInit: {
                 auto it = TypeByName.find(c->TargetName);
@@ -686,20 +1083,18 @@ public:
                 }
                 CurModule = "";
                 std::string r = N();
-                I(r + " = load %" + c->TargetName + ", ptr " + t);
-                return {"%" + c->TargetName, r, c->Ty};
+                I(r + " = load %" + tid + ", ptr " + t);
+                return {"%" + tid, r, c->Ty};
             }
             case CallExpr::Target::Method: {
                 auto* m = static_cast<MemberExpr*>(c->Callee.get());
                 Type bt = m->Base->Ty.Pointee();
                 if (bt.IsStr()) return GenStringMethod(c, m);
-                if (bt.IsArray() || bt.IsMap())
-                    throw Unsupported{c->Sp,
-                                      "los métodos de colecciones no están soportados "
-                                      "todavía por el backend llvm"};
+                if (bt.IsArray()) return GenCollMethod(c, m, bt);
+                if (bt.IsMap()) return GenCollMethod(c, m, bt);
                 LVal recv = GenLval(m->Base.get());
                 auto args = GenArgs(c);
-                std::string full = CppId(bt.Name) + "__" + c->TargetName;
+                std::string full = CppId(Canoniza(bt.Name)) + "__" + c->TargetName;
                 std::string ret = c->Ty.K == TK::Void ? "void" : LT(c->Ty, c->Sp);
                 std::string sig = "ptr " + recv.Ptr;
                 for (auto& a : args) sig += ", " + a.first + " " + a.second;
@@ -742,6 +1137,175 @@ public:
                           "backend llvm"};
     }
 
+    RVal GenCollMethod(CallExpr* c, MemberExpr* m, Type bt) {
+        const std::string& n = c->TargetName;
+        RVal b = GenExpr(m->Base.get());
+        if (bt.IsArray()) {
+            Type et = bt.Sub[0];
+            if (n == "Len") {
+                std::string r = N();
+                I(r + " = call i64 @sy_arr_len(ptr " + b.V + ")");
+                return {"i64", r, Type::Int()};
+            }
+            if (n == "Push") {
+                RVal v = GenExpr(c->Args[0].Value.get());
+                v = CastVal(v, et);
+                std::string sz = TypeSize(et, c->Sp);
+                std::string tmp = AllocaT(LT(et, c->Sp));
+                I("store " + v.T + " " + v.V + ", ptr " + tmp);
+                I("call ptr @sy_arr_push(ptr " + b.V + ", ptr " + tmp + ", i64 " + sz + ")");
+                return {"void", "", Type::Void()};
+            }
+            if (n == "Pop") {
+                std::string sz = TypeSize(et, c->Sp);
+                std::string slot = N();
+                I(slot + " = call ptr @sy_arr_pop(ptr " + b.V + ", i64 " + sz + ")");
+                std::string lt = LT(et, c->Sp);
+                std::string r = N();
+                I(r + " = load " + lt + ", ptr " + slot);
+                return {lt, r, et};
+            }
+            if (n == "Contiene") {
+                RVal v = GenExpr(c->Args[0].Value.get());
+                v = CastVal(v, et);
+                std::string sz = TypeSize(et, c->Sp);
+                std::string r = N();
+                if (et.IsStr()) {
+                    I(r + " = call i1 @sy_arr_tiene_str(ptr " + b.V + ", ptr " + v.V + ")");
+                } else {
+                    std::string tmp = AllocaT(LT(et, c->Sp));
+                    I("store " + v.T + " " + v.V + ", ptr " + tmp);
+                    I(r + " = call i1 @sy_arr_tiene(ptr " + b.V + ", ptr " + tmp + ", i64 " +
+                      sz + ")");
+                }
+                return {"i1", r, Type::Bool()};
+            }
+        } else {
+            Type kt = bt.Sub[0], vt = bt.Sub[1];
+            std::string vsz = TypeSize(vt, c->Sp);
+            if (n == "Len") {
+                std::string r = N();
+                I(r + " = call i64 @sy_map_len(ptr " + b.V + ")");
+                return {"i64", r, Type::Int()};
+            }
+            if (n == "Contiene") {
+                RVal k = GenExpr(c->Args[0].Value.get());
+                std::string r = N();
+                if (kt.IsStr())
+                    I(r + " = call i1 @sy_map_tiene_str(ptr " + b.V + ", ptr " + k.V + ")");
+                else
+                    I(r + " = call i1 @sy_map_tiene_int(ptr " + b.V + ", i64 " + k.V + ")");
+                return {"i1", r, Type::Bool()};
+            }
+            if (n == "Claves") {
+                std::string kk = kt.IsStr() ? "0" : "1";
+                std::string r = N();
+                I(r + " = call ptr @sy_map_claves(ptr " + b.V + ", i64 " + kk + ")");
+                return {"ptr", r, Type::ArrayOf(kt)};
+            }
+        }
+        throw Unsupported{c->Sp,
+                          "el método `" + n + "` de colecciones no está soportado todavía por "
+                          "el backend llvm"};
+    }
+
+    RVal GenForeignCall(CallExpr* c) {
+        auto f = ForeignDecls.find(c->TargetName);
+        if (f == ForeignDecls.end())
+            throw Unsupported{c->Sp, "llamada externa desconocida en el backend llvm"};
+        FnDecl* fd = f->second;
+        std::vector<Param*> ps;
+        for (auto& p : fd->Params)
+            if (!p.IsSelf) ps.push_back(&p);
+        std::vector<std::pair<std::string, std::string>> args;
+        for (size_t i = 0; i < c->Args.size(); i++) {
+            Arg& a = c->Args[i];
+            Type pt = i < ps.size() ? TypeOf(ps[i]->Ty) : a.Value->Ty;
+            RVal v = GenExpr(a.Value.get());
+            if (i < c->ArgCastFloat.size() && c->ArgCastFloat[i]) {
+                std::string r = N();
+                I(r + " = sitofp i64 " + v.V + " to double");
+                v = {"double", r, Type::Float()};
+            }
+            if (pt.IsStr()) {
+                std::string d = N();
+                I(d + " = getelementptr inbounds %sylt.str, ptr " + v.V + ", i32 0, i32 1");
+                std::string db = N();
+                I(db + " = load ptr, ptr " + d);
+                args.push_back({"ptr", db});
+            } else if (pt.IsBool()) {
+                std::string z = N();
+                I(z + " = zext i1 " + v.V + " to i32");
+                args.push_back({"i32", z});
+            } else if (pt.IsInt() || pt.IsFloat() || pt.IsArray() || pt.IsMap()) {
+                args.push_back({v.T, v.V});
+            } else {
+                throw Unsupported{a.Value->Sp,
+                                  "los argumentos externos de este tipo no están soportados "
+                                  "por el backend llvm"};
+            }
+        }
+        std::string ret = "void";
+        Type rt = Type::Void();
+        if (fd->HasRet) rt = TypeOf(fd->Ret);
+        if (rt.IsBool()) ret = "i32";
+        else if (!rt.IsVoid()) ret = LT(rt, c->Sp);
+        std::string sig = "";
+        for (size_t i = 0; i < args.size(); i++) {
+            if (i) sig += ", ";
+            sig += args[i].first + " " + args[i].second;
+        }
+        if (ret == "void") {
+            I("call void @" + c->TargetName + "(" + sig + ")");
+            return {"void", "", Type::Void()};
+        }
+        std::string r = N();
+        I(r + " = call " + ret + " @" + c->TargetName + "(" + sig + ")");
+        if (rt.IsStr()) {
+            std::string w = N();
+            I(w + " = call ptr @sy_str_from_c(ptr " + r + ")");
+            return {"ptr", w, Type::Str()};
+        }
+        if (rt.IsBool()) {
+            std::string t = N();
+            I(t + " = trunc i32 " + r + " to i1");
+            return {"i1", t, Type::Bool()};
+        }
+        return {ret, r, rt};
+    }
+
+    RVal GenHiloLanzar(CallExpr* c) {
+        if (c->SpawnSite < 0 || c->SpawnTarget.empty())
+            throw Unsupported{c->Sp, "lanzar hilos no está soportado por el backend llvm"};
+        std::string fn = "sylt.tramp." + std::to_string(c->SpawnSite);
+        std::string pk = N();
+        I(pk + " = call ptr @sy_paquete_nuevo()");
+        for (size_t i = 1; i < c->Args.size(); i++) {
+            RVal v = GenExpr(c->Args[i].Value.get());
+            if (i < c->ArgCastFloat.size() && c->ArgCastFloat[i]) {
+                std::string r = N();
+                I(r + " = sitofp i64 " + v.V + " to double");
+                v = {"double", r, Type::Float()};
+            }
+            Type at = c->Args[i].Value->Ty;
+            std::string idx = std::to_string(i - 1);
+            if (at.IsInt()) {
+                I("call ptr @sy_paquete_int(ptr " + pk + ", i64 " + v.V + ")");
+            } else if (at.IsFloat()) {
+                I("call ptr @sy_paquete_float(ptr " + pk + ", double " + v.V + ")");
+            } else if (at.IsBool()) {
+                std::string z = N();
+                I(z + " = zext i1 " + v.V + " to i32");
+                I("call ptr @sy_paquete_bool(ptr " + pk + ", i32 " + z + ")");
+            } else if (at.IsStr()) {
+                I("call ptr @sy_paquete_str(ptr " + pk + ", ptr " + v.V + ")");
+            }
+        }
+        std::string id = N();
+        I(id + " = call i64 @sy_hilo_lanzar(ptr @" + fn + ", ptr " + pk + ")");
+        return {"i64", id, Type::Int()};
+    }
+
     void GenBlockInner(const Block& b) {
         size_t mark = Undo.size();
         for (auto& s : b.Stmts) GenStmt(s.get());
@@ -752,17 +1316,32 @@ public:
         switch (st->K) {
             case Stmt::Kind::Let: {
                 auto* s = static_cast<LetStmt*>(st);
-                if (s->Destructure)
-                    throw Unsupported{s->Sp,
-                                      "la destructuración de tuplas no está soportada "
-                                      "todavía por el backend llvm"};
+                if (s->Destructure) {
+                    RVal v = GenExpr(s->Init.get());
+                    std::string tn = TupleType(s->VarType, s->Sp);
+                    std::string tmp = AllocaT("%" + tn);
+                    I("store " + v.T + " " + v.V + ", ptr " + tmp);
+                    for (size_t i = 0; i < s->Names.size() && i < s->VarType.Sub.size(); i++) {
+                        if (s->Names[i] == "_") continue;
+                        Type et = s->VarType.Sub[i];
+                        std::string fp = N();
+                        I(fp + " = getelementptr inbounds %" + tn + ", ptr " + tmp +
+                          ", i32 0, i32 " + std::to_string(i));
+                        std::string lt = LT(et, s->Sp);
+                        std::string lv = N();
+                        I(lv + " = load " + lt + ", ptr " + fp);
+                        std::string p = AllocaT(lt);
+                        I("store " + lt + " " + lv + ", ptr " + p);
+                        LetBind(s->Names[i], p);
+                    }
+                    return;
+                }
                 RVal v = GenExpr(s->Init.get());
                 if (s->Names[0] == "_") return;
                 Type vt = s->VarType;
                 std::string lt = LT(vt, s->Sp);
                 v = CastVal(v, vt);
-                std::string p = N();
-                I(p + " = alloca " + lt);
+                std::string p = AllocaT(lt);
                 I("store " + lt + " " + v.V + ", ptr " + p);
                 LetBind(s->Names[0], p);
                 return;
@@ -770,10 +1349,6 @@ public:
             case Stmt::Kind::Assign: {
                 auto* s = static_cast<AssignStmt*>(st);
                 Expr* t = s->Target.get();
-                if (t->K == Expr::Kind::Index)
-                    throw Unsupported{s->Sp,
-                                      "asignar por índice no está soportado todavía por "
-                                      "el backend llvm"};
                 LVal lv = GenLval(t);
                 RVal v = GenExpr(s->Value.get());
                 if (s->Op == "=") {
@@ -866,27 +1441,94 @@ public:
             }
             case Stmt::Kind::For: {
                 auto* s = static_cast<ForStmt*>(st);
-                if (!s->IsRange)
-                    throw Unsupported{s->Sp,
-                                      "iterar colecciones no está soportado todavía por el "
-                                      "backend llvm; usa un rango `for I in 0..N`"};
-                RVal lo = GenExpr(s->Low.get());
-                RVal hi = GenExpr(s->High.get());
-                std::string lp = N();
-                I(lp + " = alloca i64");
-                I("store i64 " + lo.V + ", ptr " + lp);
+                if (s->IsRange) {
+                    RVal lo = GenExpr(s->Low.get());
+                    RVal hi = GenExpr(s->High.get());
+                    std::string lp = AllocaT("i64");
+                    I("store i64 " + lo.V + ", ptr " + lp);
+                    std::string cond = Lbl("forcond"), body = Lbl("forbody");
+                    std::string step = Lbl("forstep"), end = Lbl("forend");
+                    Term("br label %" + cond);
+                    Open(cond);
+                    std::string i1 = N();
+                    I(i1 + " = load i64, ptr " + lp);
+                    std::string c = N();
+                    I(c + " = icmp slt i64 " + i1 + ", " + hi.V);
+                    Term("br i1 " + c + ", label %" + body + ", label %" + end);
+                    Open(body);
+                    size_t mark = Undo.size();
+                    LetBind(s->Var, lp);
+                    LoopStack.push_back({step, end});
+                    GenBlockInner(s->Body);
+                    LoopStack.pop_back();
+                    ScopeRestore(mark);
+                    if (!Closed.back()) Term("br label %" + step);
+                    Open(step);
+                    std::string i2 = N(), i3 = N();
+                    I(i2 + " = load i64, ptr " + lp);
+                    I(i3 + " = add i64 " + i2 + ", 1");
+                    I("store i64 " + i3 + ", ptr " + lp);
+                    Term("br label %" + cond);
+                    Open(end);
+                    return;
+                }
+                Type it = s->Low->Ty.Pointee();
+                RVal b = GenExpr(s->Low.get());
                 std::string cond = Lbl("forcond"), body = Lbl("forbody");
                 std::string step = Lbl("forstep"), end = Lbl("forend");
+                std::string len = N();
+                if (it.IsArray()) {
+                    I(len + " = call i64 @sy_arr_len(ptr " + b.V + ")");
+                } else if (it.IsMap()) {
+                    I(len + " = call i64 @sy_map_len(ptr " + b.V + ")");
+                } else {
+                    throw Unsupported{s->Sp,
+                                      "solo se itera sobre arrays y mapas en el backend llvm"};
+                }
+                std::string ip = AllocaT("i64");
+                I("store i64 0, ptr " + ip);
                 Term("br label %" + cond);
                 Open(cond);
-                std::string i1 = N();
-                I(i1 + " = load i64, ptr " + lp);
-                std::string c = N();
-                I(c + " = icmp slt i64 " + i1 + ", " + hi.V);
+                std::string i1 = N(), c = N();
+                I(i1 + " = load i64, ptr " + ip);
+                I(c + " = icmp slt i64 " + i1 + ", " + len);
                 Term("br i1 " + c + ", label %" + body + ", label %" + end);
                 Open(body);
                 size_t mark = Undo.size();
-                LetBind(s->Var, lp);
+                if (it.IsArray()) {
+                    Type et = it.Sub[0];
+                    std::string sz = TypeSize(et, s->Sp);
+                    std::string nom = StrConst(BaseName(s->Low.get()));
+                    std::string slot = N();
+                    I(slot + " = call ptr @sy_arr_slot(ptr " + b.V + ", i64 " + i1 + ", i64 " +
+                      sz + ", ptr " + nom + ")");
+                    std::string vp = AllocaT(LT(et, s->Sp));
+                    if (et.IsStr()) {
+                        std::string h0 = N(), h = N();
+                        I(h0 + " = load ptr, ptr " + slot);
+                        I(h + " = call ptr @sy_str_clona(ptr " + h0 + ")");
+                        I("store ptr " + h + ", ptr " + vp);
+                    } else {
+                        std::string v = N();
+                        I(v + " = load " + LT(et, s->Sp) + ", ptr " + slot);
+                        I("store " + LT(et, s->Sp) + " " + v + ", ptr " + vp);
+                    }
+                    LetBind(s->Var, vp);
+                } else {
+                    Type kt = it.Sub[0];
+                    std::string vp = AllocaT(kt.IsStr() ? "ptr" : "i64");
+                    if (kt.IsStr()) {
+                        std::string kh = N(), h = N();
+                        I(kh + " = call ptr @sy_map_clave_str(ptr " + b.V + ", i64 " + i1 + ")");
+                        I(h + " = call ptr @sy_str_clona(ptr " + kh + ")");
+                        I("store ptr " + h + ", ptr " + vp);
+                    } else {
+                        std::string kv = N();
+                        I(kv + " = call i64 @sy_map_clave_int(ptr " + b.V + ", i64 " + i1 + ")");
+                        I("store i64 " + kv + ", ptr " + vp);
+                    }
+                    LetBind(s->Var, vp);
+                }
                 LoopStack.push_back({step, end});
                 GenBlockInner(s->Body);
                 LoopStack.pop_back();
@@ -894,9 +1536,9 @@ public:
                 if (!Closed.back()) Term("br label %" + step);
                 Open(step);
                 std::string i2 = N(), i3 = N();
-                I(i2 + " = load i64, ptr " + lp);
+                I(i2 + " = load i64, ptr " + ip);
                 I(i3 + " = add i64 " + i2 + ", 1");
-                I("store i64 " + i3 + ", ptr " + lp);
+                I("store i64 " + i3 + ", ptr " + ip);
                 Term("br label %" + cond);
                 Open(end);
                 return;
@@ -923,8 +1565,7 @@ public:
 
     void GenMatch(MatchStmt* s) {
         RVal sv = GenExpr(s->Subject.get());
-        std::string sp = N();
-        I(sp + " = alloca " + sv.T);
+        std::string sp = AllocaT(sv.T);
         I("store " + sv.T + " " + sv.V + ", ptr " + sp);
         std::string end = Lbl("matchend");
         std::string enumKey = s->Subject->Ty.Name;
@@ -996,11 +1637,20 @@ public:
     }
 
     void Run() {
-        for (auto& im : Prog->Imports)
-            if (im.Module == "std" || StartsWith(im.Module, "std."))
-                throw Unsupported{im.Sp,
-                                  "la librería std.* usa el runtime de C++ y no está "
-                                  "disponible en el backend llvm (llega en v0.4)"};
+        if (!Prog->ForeignIncludes.empty())
+            throw Unsupported{Prog->Sp,
+                              "las funciones externas con `include` de C no están soportadas "
+                              "todavía por el backend llvm"};
+        SitioN = 0;
+        for (auto& fd : Prog->Fns) {
+            if (fd->Foreign) continue;
+            AsignaSitiosBloque(fd->Body);
+        }
+        for (auto& td : Prog->Types)
+            for (auto& m : td->Methods) {
+                if (!td->TypeParams.empty()) continue;
+                AsignaSitiosBloque(m->Body);
+            }
         EmitTypes();
         EmitDeclares();
         EmitStrOfProtos();
@@ -1011,7 +1661,324 @@ public:
                 if (!td->TypeParams.empty()) continue;
                 EmitFnDecl(*m, CppId(Key(td->Module, td->Name)) + "__" + m->Name);
             }
+        for (size_t i = 0; i < PendColl.size(); i++)
+            EmitCollStr(PendColl[i].first, PendColl[i].second);
+        EmitTrampolines();
         EmitMain();
+    }
+
+    int SitioN = 0;
+
+    void AsignaSitiosBloque(const Block& b) {
+        for (auto& s : b.Stmts) AsignaSitiosStmt(s.get());
+    }
+
+    void AsignaSitiosStmt(Stmt* st) {
+        switch (st->K) {
+            case Stmt::Kind::Let:
+                AsignaSitiosExpr(static_cast<LetStmt*>(st)->Init.get());
+                return;
+            case Stmt::Kind::Assign: {
+                auto* s = static_cast<AssignStmt*>(st);
+                AsignaSitiosExpr(s->Target.get());
+                AsignaSitiosExpr(s->Value.get());
+                return;
+            }
+            case Stmt::Kind::Expr:
+                AsignaSitiosExpr(static_cast<ExprStmt*>(st)->Sub.get());
+                return;
+            case Stmt::Kind::Return: {
+                auto* s = static_cast<ReturnStmt*>(st);
+                if (s->Value) AsignaSitiosExpr(s->Value.get());
+                return;
+            }
+            case Stmt::Kind::If: {
+                auto* s = static_cast<IfStmt*>(st);
+                AsignaSitiosExpr(s->Cond.get());
+                AsignaSitiosBloque(s->Then);
+                for (auto& br : s->Elifs) {
+                    AsignaSitiosExpr(br.Cond.get());
+                    AsignaSitiosBloque(br.Body);
+                }
+                if (s->HasElse) AsignaSitiosBloque(s->Else);
+                return;
+            }
+            case Stmt::Kind::While: {
+                auto* s = static_cast<WhileStmt*>(st);
+                AsignaSitiosExpr(s->Cond.get());
+                AsignaSitiosBloque(s->Body);
+                return;
+            }
+            case Stmt::Kind::For: {
+                auto* s = static_cast<ForStmt*>(st);
+                AsignaSitiosExpr(s->Low.get());
+                if (s->IsRange && s->High) AsignaSitiosExpr(s->High.get());
+                AsignaSitiosBloque(s->Body);
+                return;
+            }
+            case Stmt::Kind::Match: {
+                auto* s = static_cast<MatchStmt*>(st);
+                AsignaSitiosExpr(s->Subject.get());
+                for (auto& arm : s->Arms) {
+                    if (arm.Pat.Lit) AsignaSitiosExpr(arm.Pat.Lit.get());
+                    AsignaSitiosBloque(arm.Body);
+                }
+                return;
+            }
+            default:
+                return;
+        }
+    }
+
+    void AsignaSitiosExpr(Expr* e) {
+        if (!e) return;
+        switch (e->K) {
+            case Expr::Kind::Call: {
+                auto* c = static_cast<CallExpr*>(e);
+                for (auto& a : c->Args) AsignaSitiosExpr(a.Value.get());
+                if (c->Resolved == CallExpr::Target::Builtin &&
+                    c->TargetName == "HiloLanzar" && !c->SpawnTarget.empty())
+                    c->SpawnSite = SitioN++;
+                return;
+            }
+            case Expr::Kind::Unary:
+                AsignaSitiosExpr(static_cast<UnaryExpr*>(e)->Sub.get());
+                return;
+            case Expr::Kind::Binary: {
+                auto* b = static_cast<BinaryExpr*>(e);
+                AsignaSitiosExpr(b->L.get());
+                AsignaSitiosExpr(b->R.get());
+                return;
+            }
+            case Expr::Kind::Index: {
+                auto* ix = static_cast<IndexExpr*>(e);
+                AsignaSitiosExpr(ix->Base.get());
+                AsignaSitiosExpr(ix->Idx.get());
+                return;
+            }
+            case Expr::Kind::Member:
+                AsignaSitiosExpr(static_cast<MemberExpr*>(e)->Base.get());
+                return;
+            case Expr::Kind::StrLit:
+                for (auto& p : static_cast<StrLitExpr*>(e)->Parts)
+                    if (!p.IsText) AsignaSitiosExpr(p.Sub.get());
+                return;
+            case Expr::Kind::ArrayLit:
+                for (auto& x : static_cast<ArrayLitExpr*>(e)->Elems) AsignaSitiosExpr(x.get());
+                return;
+            case Expr::Kind::MapLit:
+                for (auto& p : static_cast<MapLitExpr*>(e)->Pairs) {
+                    AsignaSitiosExpr(p.Key.get());
+                    AsignaSitiosExpr(p.Val.get());
+                }
+                return;
+            case Expr::Kind::TupleLit:
+                for (auto& x : static_cast<TupleLitExpr*>(e)->Elems) AsignaSitiosExpr(x.get());
+                return;
+            default:
+                return;
+        }
+    }
+
+    void EmitTrampolines() {
+        for (size_t site = 0; site < 100000; site++) {
+            CallExpr* hallado = nullptr;
+            std::string objetivo;
+            for (auto& fd : Prog->Fns) {
+                if (fd->Foreign) continue;
+                hallado = BuscaTramp(fd->Body, site, objetivo);
+                if (hallado) break;
+            }
+            if (!hallado)
+                for (auto& td : Prog->Types) {
+                    if (!td->TypeParams.empty()) continue;
+                    for (auto& m : td->Methods) {
+                        hallado = BuscaTramp(m->Body, site, objetivo);
+                        if (hallado) break;
+                    }
+                    if (hallado) break;
+                }
+            if (!hallado) break;
+            std::vector<Type> ts;
+            for (size_t i = 1; i < hallado->Args.size(); i++)
+                ts.push_back(hallado->Args[i].Value->Ty);
+            std::string sig = "define private ptr @sylt.tramp." + std::to_string(site) +
+                              "(ptr %pk) {\n";
+            for (size_t i = 0; i < ts.size(); i++) {
+                std::string a = "";
+                if (ts[i].IsInt()) {
+                    a = N();
+                    sig += "  " + a + " = call i64 @sy_paquete_dame_int(ptr %pk, i64 " +
+                           std::to_string(i) + ")\n";
+                } else if (ts[i].IsFloat()) {
+                    a = N();
+                    sig += "  " + a + " = call double @sy_paquete_dame_float(ptr %pk, i64 " +
+                           std::to_string(i) + ")\n";
+                } else if (ts[i].IsBool()) {
+                    std::string b32 = N();
+                    sig += "  " + b32 + " = call i32 @sy_paquete_dame_bool(ptr %pk, i64 " +
+                           std::to_string(i) + ")\n";
+                    a = N();
+                    sig += "  " + a + " = trunc i32 " + b32 + " to i1\n";
+                } else if (ts[i].IsStr()) {
+                    a = N();
+                    sig += "  " + a + " = call ptr @sy_paquete_dame_str(ptr %pk, i64 " +
+                           std::to_string(i) + ")\n";
+                }
+                ls_args.push_back(a);
+            }
+            std::string call = "  call void @" + objetivo + "(";
+            for (size_t i = 0; i < ls_args.size(); i++) {
+                if (i) call += ", ";
+                call += LT(ts[i], hallado->Sp) + " " + ls_args[i];
+            }
+            call += ")\n";
+            sig += call;
+            sig += "  call void @sy_paquete_libera(ptr %pk)\n";
+            sig += "  ret ptr null\n}\n\n";
+            Bs << sig;
+            ls_args.clear();
+        }
+    }
+
+    std::vector<std::string> ls_args;
+
+    CallExpr* BuscaTramp(const Block& b, size_t site, std::string& objetivo) {
+        for (auto& s : b.Stmts) {
+            CallExpr* r = BuscaTrampStmt(s.get(), site, objetivo);
+            if (r) return r;
+        }
+        return nullptr;
+    }
+
+    CallExpr* BuscaTrampStmt(Stmt* st, size_t site, std::string& objetivo) {
+        switch (st->K) {
+            case Stmt::Kind::Let:
+                return BuscaTrampExpr(static_cast<LetStmt*>(st)->Init.get(), site, objetivo);
+            case Stmt::Kind::Assign: {
+                auto* s = static_cast<AssignStmt*>(st);
+                CallExpr* r = BuscaTrampExpr(s->Target.get(), site, objetivo);
+                if (r) return r;
+                return BuscaTrampExpr(s->Value.get(), site, objetivo);
+            }
+            case Stmt::Kind::Expr:
+                return BuscaTrampExpr(static_cast<ExprStmt*>(st)->Sub.get(), site, objetivo);
+            case Stmt::Kind::Return: {
+                auto* s = static_cast<ReturnStmt*>(st);
+                return s->Value ? BuscaTrampExpr(s->Value.get(), site, objetivo) : nullptr;
+            }
+            case Stmt::Kind::If: {
+                auto* s = static_cast<IfStmt*>(st);
+                CallExpr* r = BuscaTrampExpr(s->Cond.get(), site, objetivo);
+                if (r) return r;
+                r = BuscaTramp(s->Then, site, objetivo);
+                if (r) return r;
+                for (auto& br : s->Elifs) {
+                    r = BuscaTrampExpr(br.Cond.get(), site, objetivo);
+                    if (r) return r;
+                    r = BuscaTramp(br.Body, site, objetivo);
+                    if (r) return r;
+                }
+                if (s->HasElse) return BuscaTramp(s->Else, site, objetivo);
+                return nullptr;
+            }
+            case Stmt::Kind::While: {
+                auto* s = static_cast<WhileStmt*>(st);
+                CallExpr* r = BuscaTrampExpr(s->Cond.get(), site, objetivo);
+                if (r) return r;
+                return BuscaTramp(s->Body, site, objetivo);
+            }
+            case Stmt::Kind::For: {
+                auto* s = static_cast<ForStmt*>(st);
+                CallExpr* r = BuscaTrampExpr(s->Low.get(), site, objetivo);
+                if (r) return r;
+                if (s->IsRange && s->High) {
+                    r = BuscaTrampExpr(s->High.get(), site, objetivo);
+                    if (r) return r;
+                }
+                return BuscaTramp(s->Body, site, objetivo);
+            }
+            case Stmt::Kind::Match: {
+                auto* s = static_cast<MatchStmt*>(st);
+                CallExpr* r = BuscaTrampExpr(s->Subject.get(), site, objetivo);
+                if (r) return r;
+                for (auto& arm : s->Arms) {
+                    if (arm.Pat.Lit) {
+                        r = BuscaTrampExpr(arm.Pat.Lit.get(), site, objetivo);
+                        if (r) return r;
+                    }
+                    r = BuscaTramp(arm.Body, site, objetivo);
+                    if (r) return r;
+                }
+                return nullptr;
+            }
+            default:
+                return nullptr;
+        }
+    }
+
+    CallExpr* BuscaTrampExpr(Expr* e, size_t site, std::string& objetivo) {
+        if (!e) return nullptr;
+        if (e->K == Expr::Kind::Call) {
+            auto* c = static_cast<CallExpr*>(e);
+            if (c->Resolved == CallExpr::Target::Builtin &&
+                c->TargetName == "HiloLanzar" && c->SpawnSite == (int)site) {
+                objetivo = c->SpawnTarget;
+                return c;
+            }
+            for (auto& a : c->Args) {
+                CallExpr* r = BuscaTrampExpr(a.Value.get(), site, objetivo);
+                if (r) return r;
+            }
+            return nullptr;
+        }
+        switch (e->K) {
+            case Expr::Kind::Unary:
+                return BuscaTrampExpr(static_cast<UnaryExpr*>(e)->Sub.get(), site, objetivo);
+            case Expr::Kind::Binary: {
+                auto* b = static_cast<BinaryExpr*>(e);
+                CallExpr* r = BuscaTrampExpr(b->L.get(), site, objetivo);
+                if (r) return r;
+                return BuscaTrampExpr(b->R.get(), site, objetivo);
+            }
+            case Expr::Kind::Index: {
+                auto* ix = static_cast<IndexExpr*>(e);
+                CallExpr* r = BuscaTrampExpr(ix->Base.get(), site, objetivo);
+                if (r) return r;
+                return BuscaTrampExpr(ix->Idx.get(), site, objetivo);
+            }
+            case Expr::Kind::Member:
+                return BuscaTrampExpr(static_cast<MemberExpr*>(e)->Base.get(), site, objetivo);
+            case Expr::Kind::StrLit:
+                for (auto& p : static_cast<StrLitExpr*>(e)->Parts)
+                    if (!p.IsText) {
+                        CallExpr* r = BuscaTrampExpr(p.Sub.get(), site, objetivo);
+                        if (r) return r;
+                    }
+                return nullptr;
+            case Expr::Kind::ArrayLit:
+                for (auto& x : static_cast<ArrayLitExpr*>(e)->Elems) {
+                    CallExpr* r = BuscaTrampExpr(x.get(), site, objetivo);
+                    if (r) return r;
+                }
+                return nullptr;
+            case Expr::Kind::MapLit:
+                for (auto& p : static_cast<MapLitExpr*>(e)->Pairs) {
+                    CallExpr* r = BuscaTrampExpr(p.Key.get(), site, objetivo);
+                    if (r) return r;
+                    r = BuscaTrampExpr(p.Val.get(), site, objetivo);
+                    if (r) return r;
+                }
+                return nullptr;
+            case Expr::Kind::TupleLit:
+                for (auto& x : static_cast<TupleLitExpr*>(e)->Elems) {
+                    CallExpr* r = BuscaTrampExpr(x.get(), site, objetivo);
+                    if (r) return r;
+                }
+                return nullptr;
+            default:
+                return nullptr;
+        }
     }
 
     void EmitTypes() {
@@ -1049,6 +2016,7 @@ public:
     }
 
     void EmitDeclares() {
+        Ds << "@sylt_jb = external global [64 x i64]\n";
         Ds << "@stderr = external global ptr\n";
         Ds << "declare ptr @malloc(i64)\n";
         Ds << "declare i64 @strlen(ptr)\n";
@@ -1063,6 +2031,51 @@ public:
         Ds << "declare double @llvm.sqrt.f64(double)\n";
         Ds << "declare double @llvm.pow.f64(double, double)\n";
         Ds << "declare double @llvm.floor.f64(double)\n";
+        Ds << "declare i32 @setjmp(ptr) #0\n";
+        Ds << "declare void @longjmp(ptr, i32) #1\n";
+        Ds << "declare void @sy_test_arma()\n";
+        Ds << "declare void @sy_test_ok(ptr)\n";
+        Ds << "declare void @sy_test_mal(ptr)\n";
+        Ds << "declare i64 @sy_test_resumen(i64)\n";
+        Ds << "declare void @sy_afirma(i32, ptr, i64)\n";
+        Ds << "declare ptr @sy_arr_nuevo(i64)\n";
+        Ds << "declare void @sy_arr_push(ptr, ptr, i64)\n";
+        Ds << "declare i64 @sy_arr_len(ptr)\n";
+        Ds << "declare ptr @sy_arr_slot(ptr, i64, i64, ptr)\n";
+        Ds << "declare ptr @sy_arr_pop(ptr, i64)\n";
+        Ds << "declare i1 @sy_arr_tiene(ptr, ptr, i64)\n";
+        Ds << "declare i1 @sy_arr_tiene_str(ptr, ptr)\n";
+        Ds << "declare ptr @sy_arr_copia(ptr, i64, i1)\n";
+        Ds << "declare ptr @sy_map_nuevo(i64, i64)\n";
+        Ds << "declare i64 @sy_map_len(ptr)\n";
+        Ds << "declare i1 @sy_map_tiene_str(ptr, ptr)\n";
+        Ds << "declare i1 @sy_map_tiene_int(ptr, i64)\n";
+        Ds << "declare ptr @sy_map_slot_str(ptr, ptr, i64, ptr)\n";
+        Ds << "declare ptr @sy_map_slot_int(ptr, i64, i64, ptr)\n";
+        Ds << "declare ptr @sy_map_slot_ins_str(ptr, ptr, i64)\n";
+        Ds << "declare ptr @sy_map_slot_ins_int(ptr, i64, i64)\n";
+        Ds << "declare ptr @sy_map_pon_str(ptr, ptr, ptr, i64)\n";
+        Ds << "declare ptr @sy_map_pon_int(ptr, i64, ptr, i64)\n";
+        Ds << "declare ptr @sy_map_clave_str(ptr, i64)\n";
+        Ds << "declare i64 @sy_map_clave_int(ptr, i64)\n";
+        Ds << "declare ptr @sy_map_valor(ptr, i64, i64)\n";
+        Ds << "declare ptr @sy_map_copia(ptr, i64, i64, i1)\n";
+        Ds << "declare ptr @sy_map_claves(ptr, i64)\n";
+        Ds << "declare ptr @sy_str_clona(ptr)\n";
+        Ds << "declare ptr @sy_str_from_c(ptr)\n";
+        Ds << "declare ptr @sy_f64_prec(double, i64)\n";
+        Ds << "declare double @sy_mono_ms()\n";
+        Ds << "declare ptr @sy_paquete_nuevo()\n";
+        Ds << "declare ptr @sy_paquete_int(ptr, i64)\n";
+        Ds << "declare ptr @sy_paquete_float(ptr, double)\n";
+        Ds << "declare ptr @sy_paquete_bool(ptr, i32)\n";
+        Ds << "declare ptr @sy_paquete_str(ptr, ptr)\n";
+        Ds << "declare i64 @sy_paquete_dame_int(ptr, i64)\n";
+        Ds << "declare double @sy_paquete_dame_float(ptr, i64)\n";
+        Ds << "declare i32 @sy_paquete_dame_bool(ptr, i64)\n";
+        Ds << "declare ptr @sy_paquete_dame_str(ptr, i64)\n";
+        Ds << "declare void @sy_paquete_libera(ptr)\n";
+        Ds << "declare i64 @sy_hilo_lanzar(ptr, ptr)\n";
         for (auto& fd : Prog->Fns)
             if (fd->Foreign) EmitForeignDecl(*fd);
         Ds << "\n";
@@ -1079,7 +2092,7 @@ public:
                                   "todavía por el backend llvm"};
             return "ptr";
         }
-        if (t.IsStruct() || t.IsEnum()) return "ptr";
+        if (t.IsStruct() || t.IsEnum() || t.IsTuple()) return "ptr";
         return LT(t, p.Sp);
     }
 
@@ -1098,14 +2111,15 @@ public:
 
     void EmitForeignDecl(FnDecl& fd) {
         CurModule = fd.Module;
-        std::string ret = fd.HasRet ? LT(TypeOf(fd.Ret), fd.Sp) : "void";
+        Type rt = fd.HasRet ? TypeOf(fd.Ret) : Type::Void();
+        std::string ret = rt.IsBool() ? "i32" : (rt.IsVoid() ? "void" : LT(rt, fd.Sp));
         std::string sig = "declare " + ret + " @" + fd.Name + "(";
         for (size_t i = 0; i < fd.Params.size(); i++) {
             if (i) sig += ", ";
             Type t = TypeOf(fd.Params[i].Ty);
-            std::string lt = LT(t, fd.Params[i].Sp);
-            if (t.IsStr()) sig += "ptr";
-            else sig += lt;
+            if (t.IsStr() || t.IsArray() || t.IsMap()) sig += "ptr";
+            else if (t.IsBool()) sig += "i32";
+            else sig += LT(t, fd.Params[i].Sp);
         }
         CurModule = "";
         Ds << sig << ")\n";
@@ -1127,21 +2141,19 @@ public:
             std::string pname = p.IsSelf ? "self" : p.Name;
             Type t = TypeOf(p.Ty);
             bool borrow = p.Ty.k == TypeAnn::K::Borrow;
-            bool agg = t.IsStruct() || t.IsEnum();
+            bool agg = t.IsStruct() || t.IsEnum() || t.IsTuple();
             if (p.IsSelf || borrow) {
                 VarPtr[pname] = preg;
             } else if (agg) {
                 std::string lt = LT(t, p.Sp);
                 std::string v = N();
                 I(v + " = load " + lt + ", ptr " + preg);
-                std::string lp = N();
-                I(lp + " = alloca " + lt);
+                std::string lp = AllocaT(lt);
                 I("store " + lt + " " + v + ", ptr " + lp);
                 VarPtr[pname] = lp;
             } else {
                 std::string lt = LT(t, p.Sp);
-                std::string lp = N();
-                I(lp + " = alloca " + lt);
+                std::string lp = AllocaT(lt);
                 I("store " + lt + " " + preg + ", ptr " + lp);
                 VarPtr[pname] = lp;
             }
@@ -1156,24 +2168,49 @@ public:
             else if (RetType.IsStr()) Term("ret ptr null");
             else Term("ret " + lt + " zeroinitializer");
         }
-        std::string text;
-        for (size_t i = 0; i < Blocks.size(); i++) {
-            if (!Blocks[i].first.empty()) text += Blocks[i].first + ":\n";
-            text += Blocks[i].second;
-            if (!Closed[i]) text += "  unreachable\n";
-        }
-        Bs << sig << " {\n" << text << "}\n\n";
+        Bs << sig << " {\n" << Junta() << "}\n\n";
         RetType = Type::Err();
         CurModule = "";
     }
 
     void EmitMain() {
+        if (!Opt.TestFns.empty()) {
+            EmitTestMainLlvm();
+            return;
+        }
         auto f = FnByName.find("Main");
         if (f == FnByName.end()) return;
         Bs << "define i32 @main() {\n"
               "  call void @Main()\n"
               "  ret i32 0\n"
               "}\n\n";
+    }
+
+    void EmitTestMainLlvm() {
+        Bs << "define i32 @main() {\n";
+        Bs << "  call void @sy_test_arma()\n";
+        for (size_t i = 0; i < Opt.TestFns.size(); i++) {
+            const std::string& t = Opt.TestFns[i];
+            std::string nb = StrConst(t);
+            Bs << "  %r" << i << " = call i32 @setjmp(ptr @sylt_jb)\n";
+            Bs << "  switch i32 %r" << i << ", label %fal" << i << " [\n";
+            Bs << "    i32 0, label %run" << i << "\n";
+            Bs << "    i32 1, label %fal" << i << "\n";
+            Bs << "  ]\n";
+            Bs << "run" << i << ":\n";
+            Bs << "  call void @" << Key("", t) << "()\n";
+            Bs << "  call void @sy_test_ok(ptr " << nb << ")\n";
+            Bs << "  br label %next" << i << "\n";
+            Bs << "fal" << i << ":\n";
+            Bs << "  call void @sy_test_mal(ptr " << nb << ")\n";
+            Bs << "  br label %next" << i << "\n";
+            Bs << "next" << i << ":\n";
+        }
+        Bs << "  %f = call i64 @sy_test_resumen(i64 " << Opt.TestFns.size() << ")\n";
+        Bs << "  %z = icmp sgt i64 %f, 0\n";
+        Bs << "  %e = zext i1 %z to i32\n";
+        Bs << "  ret i32 %e\n";
+        Bs << "}\n\n";
     }
 
     void EmitStrOfProtos() {
@@ -1187,16 +2224,20 @@ public:
     std::string StrOfField(const std::string& aggKey, const std::string& vreg, FieldDecl& f,
                            int idx) {
         Type ft = TypeOf(f.Ty);
-        std::string lt = LT(ft, f.Sp);
         std::string fp = N();
         I(fp + " = getelementptr inbounds %" + CppId(aggKey) + ", ptr " + vreg + ", i32 0, i32 " +
           std::to_string(idx));
-        if (ft.IsStr()) return fp;
+        if (ft.IsStr() || ft.IsArray() || ft.IsMap()) {
+            std::string r = N();
+            I(r + " = load ptr, ptr " + fp);
+            return r;
+        }
         if (ft.IsStruct() || ft.IsEnum()) {
             std::string r = N();
             I(r + " = call ptr @sylt.str_of__" + CppId(ft.Name) + "(ptr " + fp + ")");
             return r;
         }
+        std::string lt = LT(ft, f.Sp);
         std::string v = N();
         I(v + " = load " + lt + ", ptr " + fp);
         return ToStrVal(v, ft);
@@ -1225,14 +2266,8 @@ public:
         std::string t3 = N();
         I(t3 + " = call ptr @sylt.str_concat(ptr " + acc + ", ptr " + endp + ")");
         Term("ret ptr " + t3);
-        std::string text;
-        for (size_t i = 0; i < Blocks.size(); i++) {
-            if (!Blocks[i].first.empty()) text += Blocks[i].first + ":\n";
-            text += Blocks[i].second;
-            if (!Closed[i]) text += "  unreachable\n";
-        }
         Bs << "define private ptr @sylt.str_of__" << CppId(key) << "(ptr %a0) {\n"
-           << text << "}\n\n";
+           << Junta() << "}\n\n";
     }
 
     void EmitStrOfEnum(EnumDecl& ed) {
@@ -1246,8 +2281,7 @@ public:
         I(tagp + " = getelementptr inbounds %" + CppId(key) + ", ptr %a0, i32 0, i32 0");
         std::string tag = N();
         I(tag + " = load i64, ptr " + tagp);
-        std::string rp = N();
-        I(rp + " = alloca ptr");
+        std::string rp = AllocaT("ptr");
         std::string end = Lbl("strend");
         for (size_t vi = 0; vi < ed.Variants.size(); vi++) {
             EnumVariant& v = ed.Variants[vi];
@@ -1290,15 +2324,9 @@ public:
         std::string r = N();
         I(r + " = load ptr, ptr " + rp);
         Term("ret ptr " + r);
-        std::string text;
-        for (size_t i = 0; i < Blocks.size(); i++) {
-            if (!Blocks[i].first.empty()) text += Blocks[i].first + ":\n";
-            text += Blocks[i].second;
-            if (!Closed[i]) text += "  unreachable\n";
-        }
         (void)unk;
         Bs << "define private ptr @sylt.str_of__" << CppId(key) << "(ptr %a0) {\n"
-           << text << "}\n\n";
+           << Junta() << "}\n\n";
     }
 
     std::string EmitRuntime() {
@@ -1434,6 +2462,8 @@ std::string GenLlvm(ProgramP& prog, const GenOptions& opt) {
     Out << "@.fmt.s = private unnamed_addr constant [3 x i8] c\"%s\\00\"\n";
     Out << "@.s.true = private unnamed_addr constant [5 x i8] c\"true\\00\"\n";
     Out << "@.s.false = private unnamed_addr constant [6 x i8] c\"false\\00\"\n\n";
+    Out << "attributes #0 = { returns_twice }\n";
+    Out << "attributes #1 = { noreturn }\n\n";
     Out << rt << "\n" << g.Bs.str();
     return Out.str();
 }

@@ -428,9 +428,9 @@ struct BuiltinDef {
     int MinArgs, MaxArgs;
 };
 const std::vector<BuiltinDef> kBuiltinNames = {
-    {"Print", 1, 1}, {"Str", 1, 1},   {"Sqrt", 1, 1}, {"Abs", 1, 1},
+    {"Print", 1, 1}, {"Str", 1, 2},   {"Sqrt", 1, 1}, {"Abs", 1, 1},
     {"Min", 2, 2},   {"Max", 2, 2},   {"Pow", 2, 2},  {"Floor", 1, 1},
-    {"Clone", 1, 1}, {"TiempoMs", 0, 0}, {"Afirma", 2, 2},
+    {"Clone", 1, 1}, {"TiempoMs", 0, 0}, {"Afirma", 2, 2}, {"HiloLanzar", 1, 9},
 };
 bool IsBuiltin(const std::string& n) {
     for (auto& b : kBuiltinNames)
@@ -2248,6 +2248,93 @@ public:
         Rep.Emit(d);
         return false;
     }
+    Type CheckHiloLanzar(CallExpr* c) {
+        auto revisar_resto = [&](FnDecl* fd) {
+            std::vector<Param*> ps;
+            if (fd)
+                for (auto& p : fd->Params)
+                    if (!p.IsSelf) ps.push_back(&p);
+            for (size_t i = 1; i < c->Args.size(); i++) CheckExpr(c->Args[i].Value.get());
+            (void)ps;
+        };
+        if (c->Args[0].Value->K != Expr::Kind::Ident) {
+            Diag d = Rep.Err("E0401", c->Args[0].Value->Sp,
+                "HiloLanzar necesita el nombre de una función como primer argumento");
+            d.Helps.push_back("ejemplo: HiloLanzar(Atender, Cliente, Direccion)");
+            Rep.Emit(d);
+            revisar_resto(nullptr);
+            return Type::Err();
+        }
+        auto* id = static_cast<IdentExpr*>(c->Args[0].Value.get());
+        FnDecl* fd = FindFn(id->Name);
+        if (!fd || fd->Foreign || fd->IsMethod) {
+            Diag d = Rep.Err("E0401", id->Sp,
+                "no puedo lanzar `" + id->Name + "` en un hilo");
+            d.Helps.push_back("HiloLanzar lanza funciones normales del programa: fn Nombre(...)");
+            d.Helps.push_back("ejemplo: HiloLanzar(Atender, Cliente, Direccion)");
+            Rep.Emit(d);
+            revisar_resto(nullptr);
+            return Type::Err();
+        }
+        auto TipoVale = [](const Type& t) {
+            return t.IsInt() || t.IsFloat() || t.IsBool() || t.IsStr();
+        };
+        std::vector<Param*> ps;
+        for (auto& p : fd->Params)
+            if (!p.IsSelf) ps.push_back(&p);
+        bool ok = true;
+        for (auto* p : ps) {
+            Type pt = ResolveType(p->Ty, false, true);
+            if (!IsErr(pt) && !TipoVale(pt)) {
+                Diag d = Rep.Err("E0401", p->Sp,
+                    "no puedo lanzar `" + fd->Name + "` en un hilo: el parámetro `" + p->Name +
+                        "` es `" + TypeName(pt) + "`");
+                d.Helps.push_back(
+                    "los parámetros de una función lanzada deben ser int, float, bool o string");
+                Rep.Emit(d);
+                ok = false;
+            }
+        }
+        if (c->Args.size() - 1 != ps.size()) {
+            Diag d = Rep.Err("E0401", c->Sp,
+                "`" + fd->Name + "` recibe " + std::to_string(ps.size()) +
+                    " argumentos, pero HiloLanzar le pasa " +
+                    std::to_string(c->Args.size() - 1));
+            d.Helps.push_back("ejemplo: HiloLanzar(Atender, Cliente, Direccion)");
+            Rep.Emit(d);
+            ok = false;
+        }
+        c->ArgCastFloat.assign(c->Args.size(), false);
+        for (size_t i = 1; i < c->Args.size(); i++) {
+            Type at = CheckExpr(c->Args[i].Value.get());
+            if (IsErr(at)) continue;
+            if (!TipoVale(at)) {
+                Diag d = Rep.Err("E0401", c->Args[i].Value->Sp,
+                    "HiloLanzar copia los argumentos al hilo: usa int, float, bool o string, "
+                    "no `" + TypeName(at) + "`");
+                Rep.Emit(d);
+                ok = false;
+                continue;
+            }
+            if (i - 1 < ps.size()) {
+                Type pt = ResolveType(ps[i - 1]->Ty, false, true);
+                if (!IsErr(pt)) {
+                    if (pt.IsFloat() && at.IsInt()) {
+                        c->ArgCastFloat[i] = true;
+                    } else if (!pt.SameAs(at)) {
+                        Diag d = Rep.Err("E0401", c->Args[i].Value->Sp,
+                            "el argumento " + std::to_string(i) + " de `" + fd->Name +
+                                "` debe ser `" + TypeName(pt) + "`, pero es `" +
+                                TypeName(at) + "`");
+                        Rep.Emit(d);
+                        ok = false;
+                    }
+                }
+            }
+        }
+        if (ok) c->SpawnTarget = FnKey(fd);
+        return Type::Int();
+    }
     Type CheckBuiltinCall(CallExpr* c, const std::string& name) {
         c->Resolved = CallExpr::Target::Builtin;
         c->TargetName = name;
@@ -2280,8 +2367,20 @@ public:
         }
         if (name == "Str") {
             CheckExpr(c->Args[0].Value.get());
+            if (c->Args.size() == 2) {
+                Type d = CheckExpr(c->Args[1].Value.get());
+                if (!IsErr(d) && !d.IsInt()) {
+                    Diag d2 = Rep.Err("E0401", c->Args[1].Value->Sp,
+                        "los decimales de Str deben ser `int`, pero son `" +
+                        TypeName(d) + "`");
+                    d2.Helps.push_back(
+                        "ejemplo: Str(3.14159, 2) devuelve \"3.14\"");
+                    Rep.Emit(d2);
+                }
+            }
             return Type::Str();
         }
+        if (name == "HiloLanzar") return CheckHiloLanzar(c);
         if (name == "TiempoMs") return Type::Float();
         if (name == "Sqrt") {
             Type t = CheckExpr(c->Args[0].Value.get());

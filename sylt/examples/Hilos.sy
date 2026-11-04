@@ -1,0 +1,19 @@
+import std.hilo
+
+fn Trabajo(N: int, Nombre: string):
+    std.hilo.Dormir(30 * N)
+    Print("hilo {N} ({Nombre}) terminó")
+
+fn Suma(A: int, B: int):
+    std.hilo.Dormir(10)
+    Print("suma = {A + B}")
+
+fn Main():
+    Print("lanzando tres hilos...")
+    let H1 = HiloLanzar(Trabajo, 1, "uno")
+    let H2 = HiloLanzar(Trabajo, 2, "dos")
+    let H3 = HiloLanzar(Suma, 10, 32)
+    std.hilo.Esperar(H1)
+    std.hilo.Esperar(H2)
+    std.hilo.Esperar(H3)
+    Print("todos los hilos terminaron")

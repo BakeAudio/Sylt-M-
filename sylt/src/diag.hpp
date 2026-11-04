@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdio>
 #include <string>
 #include <vector>
 #include "common.hpp"
@@ -53,13 +54,15 @@ public:
     int ErrorCount() const { return Errors; }
     int WarningCount() const { return Warnings; }
     void Use(const SourceFile* f) { Cur = f ? f : &Src; }
+    void SetSink(std::vector<Diag>* sink) { Sink = sink; }
 private:
-    void RenderBox(const SourceFile& F, const Diag::Note& n) const;
+    void RenderBox(const SourceFile& F, const Diag::Note& n, FILE* out) const;
     const SourceFile& Src;
     const SourceFile* Cur;
     bool Color;
     int Errors = 0;
     int Warnings = 0;
+    std::vector<Diag>* Sink = nullptr;
 };
 struct Palette {
     std::string Err, Warn, Note, Help, Dim, Caret, Reset;

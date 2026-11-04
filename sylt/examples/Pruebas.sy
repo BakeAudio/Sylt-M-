@@ -1,3 +1,5 @@
+import std.json
+
 fn Doble(N: int) -> int:
     return N * 2
 
@@ -28,3 +30,13 @@ fn PruebaMatch():
             case _:
                 Total += 10
     Afirma(Total == 23, "el recuento del match debería ser 23")
+
+fn PruebaJson():
+    let (Ok, _Err, V) = std.json.Parse("[1, 2.5, \"tres\"]")
+    Afirma(Ok, "Parse de lista válida debería funcionar")
+    Afirma(std.json.Texto(V) == "[1.0,2.5,\"tres\"]", "el serial de la lista no cuadra")
+    let (OkO, _ErrO, O) = std.json.Parse("{{ \"a\": true }}")
+    Afirma(OkO, "Parse de objeto válido debería funcionar")
+    Afirma(std.json.Texto(O) == "{{\"a\":true}}", "el serial del objeto no cuadra")
+    let (OkM, _ErrM, _) = std.json.Parse("{{ \"a\": }}")
+    Afirma(not OkM, "un json roto debería fallar")
