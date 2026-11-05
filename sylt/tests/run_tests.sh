@@ -16,7 +16,7 @@ decir_fallo() {
 }
 
 echo "== ejemplos que deben funcionar =="
-for EJ in Hola Fib Figuras Colecciones Prestamos Estados Modulos Externo Genericos Json Hilos; do
+for EJ in Hola Fib Figuras Colecciones Prestamos Estados Modulos Ramas Externo Genericos Json Hilos Acentos; do
     if $SYLTC run "examples/$EJ.sy" > /tmp/sylt_test_out.txt 2>&1; then
         decir_ok "$EJ.sy"
     else
@@ -40,6 +40,7 @@ declare -A ESPERADO=(
     [GenericoSinTipos]=E0310
     [GenericoAridad]=E0311
     [MoverAPila]=E0501
+    [BucleMueve]=E0501
 )
 for EJ in "${!ESPERADO[@]}"; do
     SALIDA=$($SYLTC check "examples/errores/$EJ.sy" 2>&1)
@@ -91,6 +92,62 @@ if echo "$SALIDA" | grep -q "E0302"; then
     decir_ok "run exige Main en un módulo (E0302)"
 else
     decir_fallo "run debería rechazar matematicas.sy con E0302"
+    echo "$SALIDA" | head -6
+fi
+
+echo "== módulos: colisión de nombres, directorios y posición del error =="
+DIR_COL=$(mktemp -d)
+mkdir -p /tmp/sylt_pkg_colision/mylib
+cat > /tmp/sylt_pkg_colision/mylib/mylib.sy <<'EOF'
+import helpers
+
+fn Saludo() -> string:
+    return helpers.Valor()
+EOF
+cat > /tmp/sylt_pkg_colision/mylib/helpers.sy <<'EOF'
+fn Valor() -> string:
+    return "del paquete"
+EOF
+cat > "$DIR_COL/helpers.sy" <<'EOF'
+fn Valor() -> string:
+    return "del proyecto"
+EOF
+cat > "$DIR_COL/principal.sy" <<'EOF'
+import helpers
+import mylib
+
+fn Main():
+    Print(mylib.Saludo())
+EOF
+export SYLT_PKG="/tmp/sylt_pkg_colision"
+SALIDA=$($SYLTC check "$DIR_COL/principal.sy" 2>&1)
+if echo "$SALIDA" | grep -q "E0703"; then
+    decir_ok "colisión: dos fuentes con el mismo nombre de módulo reportan E0703"
+else
+    decir_fallo "colisión de nombres: esperaba E0703"
+    echo "$SALIDA" | head -6
+fi
+unset SYLT_PKG
+DIR_DIR=$(mktemp -d)
+mkdir -p "$DIR_DIR/dirmod.sy"
+cat > "$DIR_DIR/principal.sy" <<'EOF'
+import dirmod
+
+fn Main():
+    Print("hola")
+EOF
+SALIDA=$($SYLTC check "$DIR_DIR/principal.sy" 2>&1)
+if echo "$SALIDA" | grep -q "E0701"; then
+    decir_ok "un directorio no vale como módulo (E0701)"
+else
+    decir_fallo "directorio como módulo: esperaba E0701"
+    echo "$SALIDA" | head -6
+fi
+SALIDA=$($SYLTC check examples/errores/ModuloFantasma.sy 2>&1)
+if echo "$SALIDA" | grep -q "ModuloFantasma.sy:[0-9]"; then
+    decir_ok "el error de módulo indica la línea del import"
+else
+    decir_fallo "E0701 debería indicar la línea del import"
     echo "$SALIDA" | head -6
 fi
 

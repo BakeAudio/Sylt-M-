@@ -1,18 +1,31 @@
 #pragma once
-#include <sys/stat.h>
-#include <unistd.h>
 #include <cstdlib>
+#include <deque>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#if defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <cstdint>
+#include <mach-o/dyld.h>
+#else
+#include <unistd.h>
+#endif
 #include "ast.hpp"
 #include "diag.hpp"
 #include "lex.hpp"
 #include "parse.hpp"
 namespace sylt {
+namespace fs = std::filesystem;
 inline bool ReadFile(const std::string& Path, std::string& Out) {
+    std::error_code Ec;
+    if (!fs::is_regular_file(Path, Ec)) return false;
     std::ifstream F(Path, std::ios::binary);
     if (!F) return false;
     std::ostringstream S;
@@ -20,23 +33,42 @@ inline bool ReadFile(const std::string& Path, std::string& Out) {
     Out = S.str();
     return true;
 }
+inline std::string CanonicalPath(const std::string& P) {
+    std::error_code Ec;
+    fs::path R = fs::weakly_canonical(fs::path(P), Ec);
+    if (Ec) return P;
+    return R.string();
+}
 inline std::string ExeDir() {
+#if defined(_WIN32)
+    char Buf[MAX_PATH];
+    DWORD N = GetModuleFileNameA(nullptr, Buf, MAX_PATH);
+    if (N == 0 || N >= MAX_PATH) return ".";
+    std::string P(Buf, (size_t)N);
+#elif defined(__APPLE__)
+    char Buf[4096];
+    uint32_t Tam = sizeof(Buf);
+    if (_NSGetExecutablePath(Buf, &Tam) != 0) return ".";
+    std::string P(Buf);
+#else
     char Buf[4096];
     ssize_t N = readlink("/proc/self/exe", Buf, sizeof(Buf) - 1);
     if (N <= 0) return ".";
     Buf[N] = 0;
     std::string P(Buf);
-    size_t S = P.rfind('/');
-    if (S == std::string::npos) return ".";
-    return P.substr(0, S);
+#endif
+    std::string Dir = fs::path(P).parent_path().string();
+    return Dir.empty() ? std::string(".") : Dir;
 }
 inline bool FileExists(const std::string& P) {
-    struct stat B;
-    return stat(P.c_str(), &B) == 0;
+    std::error_code Ec;
+    return fs::exists(P, Ec);
 }
 inline std::string HomeDir() {
     const char* H = getenv("HOME");
-    return H ? std::string(H) : std::string();
+    if (H && *H) return std::string(H);
+    const char* W = getenv("USERPROFILE");
+    return W ? std::string(W) : std::string();
 }
 inline std::string DirOfFile(const std::string& path) {
     size_t S = path.rfind('/');
@@ -86,14 +118,15 @@ struct Loader {
     std::string PkgDir;
     std::unordered_map<std::string, std::string>* Overlays = nullptr;
     std::unordered_map<std::string, size_t> Index;
-    std::vector<ModuleUnit> Units;
+    std::unordered_map<std::string, std::string> NameOwner;
+    std::deque<ModuleUnit> Units;
     std::vector<std::string> Stack;
     Loader(Reporter& rep, const std::string& lib) : Rep(rep), LibDir(lib) {}
     ProgramP ParseUnit(ModuleUnit& U) {
         auto Tokens = Lex(U.Src, Rep);
         return Parse(Tokens, U.Src, Rep);
     }
-    bool Load(const std::string& path, const std::string& name, bool isStd) {
+    bool Load(const std::string& path, const std::string& name, bool isStd, Span sp) {
         for (auto& s : Stack) {
             if (s != name) continue;
             std::string cyc;
@@ -103,15 +136,19 @@ struct Loader {
                 if (started) cyc += (cyc.empty() ? "" : " -> ") + p;
             }
             cyc += " -> " + name;
-            Diag d = Rep.ErrNoSpan("E0702",
-                "importación circular de módulos: " + cyc);
+            Diag d = sp.Line > 0
+                ? Rep.Err("E0702", sp,
+                    "importación circular de módulos: " + cyc)
+                : Rep.ErrNoSpan("E0702",
+                    "importación circular de módulos: " + cyc);
             d.Helps.push_back("los módulos no pueden importarse entre sí en círculo; "
                               "extrae lo común a un tercer módulo");
             Rep.Emit(d);
             return false;
         }
-        if (Index.count(name)) return true;
         std::string Ruta = path;
+        std::string Canon = CanonicalPath(Ruta);
+        if (Index.count(Canon)) return true;
         std::string Text;
         bool Leido = false;
         if (Overlays && Overlays->count(Ruta)) {
@@ -123,12 +160,17 @@ struct Loader {
             std::string Alt = PkgDir + "/" + name + "/" + name + ".sy";
             if (ReadFile(Alt, Text)) {
                 Ruta = Alt;
+                Canon = CanonicalPath(Alt);
+                if (Index.count(Canon)) return true;
                 Leido = true;
             }
         }
         if (!Leido) {
-            Diag d = Rep.ErrNoSpan("E0701",
-                "no encuentro el módulo `" + name + "`");
+            Diag d = sp.Line > 0
+                ? Rep.Err("E0701", sp,
+                    "no encuentro el módulo `" + name + "`")
+                : Rep.ErrNoSpan("E0701",
+                    "no encuentro el módulo `" + name + "`");
             d.Helps.push_back("busqué en: " + Ruta);
             if (!isStd && !PkgDir.empty())
                 d.Helps.push_back("y en el registro local de paquetes: " + PkgDir);
@@ -143,19 +185,36 @@ struct Loader {
             Rep.Emit(d);
             return false;
         }
+        auto owner = NameOwner.find(name);
+        if (owner != NameOwner.end() && owner->second != Canon) {
+            Diag d = sp.Line > 0
+                ? Rep.Err("E0703", sp,
+                    "el nombre de módulo `" + name + "` ya lo usa otro archivo")
+                : Rep.ErrNoSpan("E0703",
+                    "el nombre de módulo `" + name + "` ya lo usa otro archivo");
+            d.Helps.push_back("este import resuelve a: " + Canon);
+            d.Helps.push_back("y el nombre `" + name + "` ya apunta a: " + owner->second);
+            d.Helps.push_back("dos fuentes distintas no pueden compartir nombre de módulo: "
+                              "renombra uno de los dos archivos");
+            Rep.Emit(d);
+            return false;
+        }
+        NameOwner[name] = Canon;
         Stack.push_back(name);
-        ModuleUnit U;
+        Units.emplace_back();
+        ModuleUnit& U = Units.back();
         U.Name = name;
         U.Path = Ruta;
         U.Src.Load(Ruta, Text);
         Rep.Use(&U.Src);
         U.Prog = ParseUnit(U);
+        Index[Canon] = Units.size() - 1;
         bool ok = true;
         for (auto& im : U.Prog->Imports) {
             if (im.Module == "std" || StartsWith(im.Module, "std.")) {
                 std::string sub = im.Module.substr(4);
                 std::string p2 = LibDir + "/std/" + sub + ".sy";
-                if (!Load(p2, im.Module, true)) ok = false;
+                if (!Load(p2, im.Module, true, im.Sp)) ok = false;
                 continue;
             }
             if (im.Module.find('.') != std::string::npos) {
@@ -168,11 +227,9 @@ struct Loader {
                 continue;
             }
             std::string p2 = DirOfFile(Ruta) + "/" + im.Module + ".sy";
-            if (!Load(p2, im.Module, false)) ok = false;
+            if (!Load(p2, im.Module, false, im.Sp)) ok = false;
         }
         Stack.pop_back();
-        Index[name] = Units.size();
-        Units.push_back(std::move(U));
         Rep.Use(nullptr);
         return ok;
     }

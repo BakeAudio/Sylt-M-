@@ -590,6 +590,44 @@ public:
         }
         top[n] = std::move(v);
     }
+    using MoveSnap = std::vector<std::unordered_map<std::string, VarInfo>>;
+    void MergeMovesInto(MoveSnap& base, size_t depth) {
+        for (size_t d = 0; d < depth && d < Scopes.size() && d < base.size(); d++) {
+            for (auto& kv : Scopes[d]) {
+                auto f = base[d].find(kv.first);
+                if (f == base[d].end()) continue;
+                if (kv.second.Moved && !f->second.Moved) {
+                    f->second.Moved = true;
+                    f->second.MoveSp = kv.second.MoveSp;
+                }
+                if (kv.second.Used) f->second.Used = true;
+            }
+        }
+    }
+    bool SameMoves(const MoveSnap& A, const MoveSnap& B, size_t depth) {
+        for (size_t d = 0; d < depth && d < A.size() && d < B.size(); d++) {
+            if (A[d].size() != B[d].size()) return false;
+            for (auto& kv : A[d]) {
+                auto f = B[d].find(kv.first);
+                if (f == B[d].end()) return false;
+                if (f->second.Moved != kv.second.Moved) return false;
+                if (f->second.Used != kv.second.Used) return false;
+                if (f->second.Moved && (f->second.MoveSp.Line != kv.second.MoveSp.Line ||
+                                        f->second.MoveSp.Col != kv.second.MoveSp.Col))
+                    return false;
+            }
+        }
+        return true;
+    }
+    void WalkBranch(const Block& b, MoveSnap& acum) {
+        MoveSnap saved = Scopes;
+        size_t depth = Scopes.size();
+        Push();
+        WalkBlock(b);
+        Pop();
+        MergeMovesInto(acum, depth);
+        Scopes = std::move(saved);
+    }
     void ReportNotMutable(Span sp, const std::string& name, const VarInfo& v) {
         Diag d;
         switch (v.KindV) {
@@ -1502,6 +1540,11 @@ public:
                         TypeMismatch(s->Value->Sp, targetTy, valTy);
                     }
                 }
+                if (s->Target->K == Expr::Kind::Ident && valTy.IsStruct()) {
+                    auto* tgt = static_cast<IdentExpr*>(s->Target.get());
+                    VarInfo* tv = FindVar(tgt->Name);
+                    if (tv) tv->Moved = false;
+                }
                 if (valTy.IsStruct() && s->Value->K == Expr::Kind::Ident)
                     s->ValMoved = MoveVar(s->Value.get());
                 return;
@@ -1543,19 +1586,38 @@ public:
             case Stmt::Kind::If: {
                 auto* s = static_cast<IfStmt*>(st);
                 CheckCond(s->Cond.get(), "if");
-                Push(); WalkBlock(s->Then); Pop();
+                MoveSnap acum = Scopes;
+                WalkBranch(s->Then, acum);
                 for (auto& br : s->Elifs) {
                     CheckCond(br.Cond.get(), "elif");
-                    Push(); WalkBlock(br.Body); Pop();
+                    WalkBranch(br.Body, acum);
                 }
-                if (s->HasElse) { Push(); WalkBlock(s->Else); Pop(); }
+                if (s->HasElse) WalkBranch(s->Else, acum);
+                Scopes = std::move(acum);
                 return;
             }
             case Stmt::Kind::While: {
                 auto* s = static_cast<WhileStmt*>(st);
                 CheckCond(s->Cond.get(), "while");
+                MoveSnap entry = Scopes;
+                size_t depth = Scopes.size();
                 InLoop++;
-                Push(); WalkBlock(s->Body); Pop();
+                Rep.Quiet++;
+                for (int pass = 0; pass < 12; pass++) {
+                    Scopes = entry;
+                    Push();
+                    WalkBlock(s->Body);
+                    Pop();
+                    MoveSnap next = entry;
+                    MergeMovesInto(next, depth);
+                    if (SameMoves(next, entry, depth)) break;
+                    entry = std::move(next);
+                }
+                Rep.Quiet--;
+                Scopes = entry;
+                Push();
+                WalkBlock(s->Body);
+                Pop();
                 InLoop--;
                 return;
             }
@@ -1601,7 +1663,20 @@ public:
                 v.KindV = VarInfo::Kind::LoopVar;
                 Push();
                 Bind(s->Var, std::move(v), s->Sp);
+                MoveSnap entry = Scopes;
+                size_t depth = Scopes.size();
                 InLoop++;
+                Rep.Quiet++;
+                for (int pass = 0; pass < 12; pass++) {
+                    Scopes = entry;
+                    WalkBlock(s->Body);
+                    MoveSnap next = entry;
+                    MergeMovesInto(next, depth);
+                    if (SameMoves(next, entry, depth)) break;
+                    entry = std::move(next);
+                }
+                Rep.Quiet--;
+                Scopes = entry;
                 WalkBlock(s->Body);
                 InLoop--;
                 Pop();
@@ -2921,13 +2996,12 @@ public:
         }
         std::unordered_map<std::string, Span> covered;
         bool sawWildcard = false;
+        MoveSnap acum = Scopes;
         for (auto& arm : s->Arms) {
             Pattern& pat = arm.Pat;
             if (pat.k == Pattern::K::Wildcard) {
                 sawWildcard = true;
-                Push();
-                WalkBlock(arm.Body);
-                Pop();
+                WalkBranch(arm.Body, acum);
                 continue;
             }
             if (pat.k == Pattern::K::Literal) {
@@ -2938,16 +3012,12 @@ public:
                         "`: sus casos son variantes, no literales");
                     d.Helps.push_back("usa `case NombreVariante:` (con `(X, Y)` si lleva valores)");
                     Rep.Emit(d);
-                    Push();
-                    WalkBlock(arm.Body);
-                    Pop();
+                    WalkBranch(arm.Body, acum);
                     continue;
                 }
                 if (!IsErr(st) && !IsErr(lt) && !AssignableTo(lt, st) && !AssignableTo(st, lt))
                     TypeMismatch(pat.Lit->Sp, st, lt);
-                Push();
-                WalkBlock(arm.Body);
-                Pop();
+                WalkBranch(arm.Body, acum);
                 continue;
             }
             if (!enumSubject) {
@@ -2959,9 +3029,7 @@ public:
                                       "usa literales o `case _:`");
                     Rep.Emit(d);
                 }
-                Push();
-                WalkBlock(arm.Body);
-                Pop();
+                WalkBranch(arm.Body, acum);
                 continue;
             }
             std::string enumKey, varName;
@@ -2977,9 +3045,7 @@ public:
                     std::string sug = SuggestName(enumDisplay, &ssp);
                     if (!sug.empty()) d.Helps.push_back("¿quisiste decir `" + sug + "`?");
                     Rep.Emit(d);
-                    Push();
-                    WalkBlock(arm.Body);
-                    Pop();
+                    WalkBranch(arm.Body, acum);
                     continue;
                 }
                 enumKey = e2->Name;
@@ -2997,9 +3063,7 @@ public:
                     }
                     if (!best.empty()) d.Helps.push_back("¿quisiste decir `" + best + "`?");
                     Rep.Emit(d);
-                    Push();
-                    WalkBlock(arm.Body);
-                    Pop();
+                    WalkBranch(arm.Body, acum);
                     continue;
                 }
                 enumKey = vf->EnumName;
@@ -3009,9 +3073,7 @@ public:
             const EnumVarInfo* vv =
                 (ef != Enums.end()) ? FindVariantIn(ef->second, varName) : nullptr;
             if (!vv) {
-                Push();
-                WalkBlock(arm.Body);
-                Pop();
+                WalkBranch(arm.Body, acum);
                 continue;
             }
             pat.TagIndex = vv->Index;
@@ -3022,9 +3084,7 @@ public:
                     "este patrón es del enum `" + DisplayName(enumKey) + "`, pero el sujeto del "
                     "match es `" + TypeName(st) + "`");
                 Rep.Emit(d);
-                Push();
-                WalkBlock(arm.Body);
-                Pop();
+                WalkBranch(arm.Body, acum);
                 continue;
             }
             auto dup = covered.find(varName);
@@ -3050,6 +3110,8 @@ public:
                                                      " (usa `_` para ignorar alguno)");
                 Rep.Emit(d);
             }
+            MoveSnap savedArm = Scopes;
+            size_t armDepth = Scopes.size();
             Push();
             for (size_t i = 0; i < pat.Bindings.size() && i < vv->Fields.size(); i++) {
                 if (pat.Bindings[i] == "_") continue;
@@ -3063,7 +3125,10 @@ public:
             }
             WalkBlock(arm.Body);
             Pop();
+            MergeMovesInto(acum, armDepth);
+            Scopes = std::move(savedArm);
         }
+        Scopes = std::move(acum);
         if (IsErr(st)) return;
         if (ei) {
             if (!sawWildcard) {

@@ -1,0 +1,12 @@
+type Caja:
+    S: string
+
+fn Consumo(C: Caja):
+    Print("consumo: {C.S}")
+
+fn Main():
+    let C = Caja(S: "hola")
+    var N = 0
+    while N < 2:
+        Consumo(C)
+        N += 1

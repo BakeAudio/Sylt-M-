@@ -1,0 +1,14 @@
+type Tarea:
+    Título: string
+    Hecha: bool = false
+
+fn Resumen(T: Tarea) -> string:
+    return "tarea: {T.Título}"
+
+fn Doble(Número: int) -> int:
+    return Número * 2
+
+fn Main():
+    var Año = 2026
+    let T = Tarea(Título: "práctica")
+    Print("{Año}: {Resumen(T)} y el doble de 21 es {Doble(21)}")

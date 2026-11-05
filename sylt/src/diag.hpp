@@ -55,6 +55,7 @@ public:
     int WarningCount() const { return Warnings; }
     void Use(const SourceFile* f) { Cur = f ? f : &Src; }
     void SetSink(std::vector<Diag>* sink) { Sink = sink; }
+    int Quiet = 0;
 private:
     void RenderBox(const SourceFile& F, const Diag::Note& n, FILE* out) const;
     const SourceFile& Src;

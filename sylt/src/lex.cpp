@@ -1,9 +1,40 @@
 #include "lex.hpp"
 #include <cctype>
 #include <cerrno>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 namespace sylt {
 namespace {
+
+bool EsLetraUnicode(uint32_t cp) {
+    if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')) return true;
+    if (cp >= 0xC0 && cp <= 0xD6) return true;
+    if (cp >= 0xD8 && cp <= 0xF6) return true;
+    if (cp >= 0xF8 && cp <= 0x24F) return true;
+    if (cp >= 0x370 && cp <= 0x3FF) return true;
+    if (cp >= 0x400 && cp <= 0x52F) return true;
+    return false;
+}
+
+std::string VisibilidadCaracter(const std::string& text, size_t pos) {
+    unsigned char c = (unsigned char)text[pos];
+    int cont = 0;
+    if ((c & 0xE0) == 0xC0) cont = 1;
+    else if ((c & 0xF0) == 0xE0) cont = 2;
+    else if ((c & 0xF8) == 0xF0) cont = 3;
+    if (cont > 0 && pos + cont < text.size()) {
+        bool valida = true;
+        for (int i = 1; i <= cont; i++)
+            if (((unsigned char)text[pos + i] & 0xC0) != 0x80) valida = false;
+        if (valida) return text.substr(pos, (size_t)cont + 1);
+    }
+    if (cont == 0 && c < 0x80) return std::string(1, (char)c);
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "\\x%02x", (unsigned)c);
+    return std::string(buf);
+}
+
 struct Lexer {
     const SourceFile& Src;
     Reporter& Rep;
@@ -25,6 +56,34 @@ struct Lexer {
     char Cur() const { return AtEnd() ? '\0' : Src.Text[Pos]; }
     char Peek(size_t n = 1) const {
         return Pos + n < Src.Text.size() ? Src.Text[Pos + n] : '\0';
+    }
+    bool Decodifica(size_t p, uint32_t& cp, int& len) const {
+        unsigned char c = (unsigned char)Src.Text[p];
+        if (c < 0x80) { cp = c; len = 1; return true; }
+        int cont = 0;
+        if ((c & 0xE0) == 0xC0) { cont = 1; cp = c & 0x1Fu; }
+        else if ((c & 0xF0) == 0xE0) { cont = 2; cp = c & 0x0Fu; }
+        else if ((c & 0xF8) == 0xF0) { cont = 3; cp = c & 0x07u; }
+        else return false;
+        if (p + (size_t)cont >= Src.Text.size()) return false;
+        for (int i = 1; i <= cont; i++) {
+            unsigned char k = (unsigned char)Src.Text[p + (size_t)i];
+            if ((k & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (k & 0x3Fu);
+        }
+        len = cont + 1;
+        return true;
+    }
+    void ErrorCaracter() {
+        std::string vis = VisibilidadCaracter(Src.Text, Pos);
+        int salto = 1;
+        uint32_t cp = 0;
+        int len = 0;
+        if (Decodifica(Pos, cp, len)) salto = len;
+        Span sp = Here(salto);
+        Rep.Emit(Rep.Err("E0101", sp,
+            "no sé qué hacer con el carácter `" + vis + "`"));
+        for (int i = 0; i < salto; i++) Advance();
     }
     void Advance() {
         if (AtEnd()) return;
@@ -177,9 +236,19 @@ struct Lexer {
     void LexIdent() {
         Span sp = Here();
         std::string raw;
-        while (isalpha((unsigned char)Cur()) || isdigit((unsigned char)Cur()) || Cur() == '_') {
-            raw.push_back(Cur());
-            Advance();
+        while (!AtEnd()) {
+            char c = Cur();
+            if (isalpha((unsigned char)c) || isdigit((unsigned char)c) || c == '_') {
+                raw.push_back(c);
+                Advance();
+                continue;
+            }
+            if ((unsigned char)c < 0x80) break;
+            uint32_t cp = 0;
+            int len = 0;
+            if (!Decodifica(Pos, cp, len) || !EsLetraUnicode(cp)) break;
+            raw.append(Src.Text, Pos, (size_t)len);
+            for (int i = 0; i < len; i++) Advance();
         }
         sp.Len = (int)raw.size();
         TT t = TT::Ident;
@@ -296,6 +365,18 @@ struct Lexer {
             }
             if (isdigit((unsigned char)c)) { LexNumber(); LastWasContent = true; continue; }
             if (isalpha((unsigned char)c) || c == '_') { LexIdent(); LastWasContent = true; continue; }
+            if ((unsigned char)c >= 0x80) {
+                uint32_t cp = 0;
+                int len = 0;
+                if (Decodifica(Pos, cp, len) && EsLetraUnicode(cp)) {
+                    LexIdent();
+                    LastWasContent = true;
+                    continue;
+                }
+                ErrorCaracter();
+                LastWasContent = true;
+                continue;
+            }
             if (c == '"') { LexString(); LastWasContent = true; continue; }
             if (c == '!' && Peek() != '=') {
                 Diag d = Rep.Err("E0101", Here(1), "no existe el operador `!`");

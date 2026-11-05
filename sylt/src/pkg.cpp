@@ -16,6 +16,11 @@ namespace {
 
 std::string Q(const std::string& s) { return "'" + s + "'"; }
 
+void EjecutaDescartando(const std::string& cmd) {
+    int Rc = std::system(cmd.c_str());
+    (void)Rc;
+}
+
 bool NombreValido(const std::string& n) {
     if (n.empty() || n == "std") return false;
     if (!(isalpha((unsigned char)n[0]) || n[0] == '_')) return false;
@@ -173,7 +178,7 @@ int PkgAdd(const std::string& PkgDir, const std::string& fuente,
         if (std::system(cmd.c_str()) != 0) {
             std::cerr << "no pude clonar " << fuente << "\n";
             std::cerr << "comprueba la URL y tu conexión: " << cmd << "\n";
-            std::system((std::string("rm -rf ") + Q(R)).c_str());
+            EjecutaDescartando(std::string("rm -rf ") + Q(R));
             return 1;
         }
     } else {
@@ -216,7 +221,7 @@ int PkgAdd(const std::string& PkgDir, const std::string& fuente,
             std::cerr << "busqué en: " << staged << "\n";
             std::cerr << "un paquete vive en una carpeta con su módulo principal "
                          "`<nombre>.sy` y los módulos que necesite junto a él\n";
-            std::system((std::string("rm -rf ") + Q(staged)).c_str());
+            EjecutaDescartando(std::string("rm -rf ") + Q(staged));
             return 1;
         }
     }
@@ -228,11 +233,11 @@ int PkgAdd(const std::string& PkgDir, const std::string& fuente,
         std::string mv = "mv " + Q(staged) + " " + Q(destino);
         if (std::system(mv.c_str()) != 0) {
             std::cerr << "no pude mover el paquete a su sitio\n";
-            std::system((std::string("rm -rf ") + Q(staged)).c_str());
+            EjecutaDescartando(std::string("rm -rf ") + Q(staged));
             return 2;
         }
         std::string limpiar = staged.substr(0, staged.rfind('/'));
-        std::system((std::string("rm -rf ") + Q(limpiar)).c_str());
+        EjecutaDescartando(std::string("rm -rf ") + Q(limpiar));
     } else {
         std::string cp = "cp -r " + Q(fuente + "/.") + " " + Q(destino);
         if (std::system(cp.c_str()) != 0) {

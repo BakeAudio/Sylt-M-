@@ -1,0 +1,16 @@
+type Caja:
+    S: string
+
+fn Consumo(C: Caja):
+    Print("consumo: {C.S}")
+
+fn Main():
+    var Bandera = true
+    let A = Caja(S: "si")
+    let B = Caja(S: "no")
+    if Bandera:
+        Consumo(A)
+    else:
+        Print(A.S)
+    Print(B.S)
+    Consumo(B)

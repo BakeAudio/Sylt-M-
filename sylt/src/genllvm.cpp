@@ -115,6 +115,8 @@ public:
         return Type::Err();
     }
 
+    static std::string Q(const std::string& id) { return "\"" + id + "\""; }
+
     std::string LT(const Type& t, const Span& sp) {
         switch (t.K) {
             case TK::Int: return "i64";
@@ -122,8 +124,8 @@ public:
             case TK::Bool: return "i1";
             case TK::Str: return "ptr";
             case TK::Void: return "void";
-            case TK::Struct: return "%" + CppId(Canoniza(t.Name));
-            case TK::Enum: return "%" + CppId(Canoniza(t.Name));
+            case TK::Struct: return "%" + Q(CppId(Canoniza(t.Name)));
+            case TK::Enum: return "%" + Q(CppId(Canoniza(t.Name)));
             case TK::Borrow: return LT(t.Pointee(), sp);
             case TK::Array: return "ptr";
             case TK::Map: return "ptr";
@@ -314,9 +316,9 @@ public:
         else if (t.IsBool()) I(r + " = call ptr @sylt.bool_str(i1 " + reg + ")");
         else if (t.IsStruct() || t.IsEnum()) {
             std::string tid = CppId(t.Name);
-            std::string tmp = AllocaT("%" + tid);
-            I("store %" + tid + " " + reg + ", ptr " + tmp);
-            I(r + " = call ptr @sylt.str_of__" + tid + "(ptr " + tmp + ")");
+            std::string tmp = AllocaT("%" + Q(tid));
+            I("store %" + Q(tid) + " " + reg + ", ptr " + tmp);
+            I(r + " = call ptr @" + Q("sylt.str_of__" + tid) + "(ptr " + tmp + ")");
         } else if (t.IsArray()) {
             std::string fn = CollStrFn(t, 0);
             I(r + " = call ptr @" + fn + "(ptr " + reg + ")");
@@ -468,7 +470,7 @@ public:
                 throw Unsupported{m->Sp, "tipo desconocido en el backend llvm"};
             int idx = FieldIndex(f->second, m->Name);
             std::string r = N();
-            I(r + " = getelementptr inbounds %" + CppId(Canoniza(bt.Name)) + ", ptr " + b.Ptr +
+            I(r + " = getelementptr inbounds %" + Q(CppId(Canoniza(bt.Name))) + ", ptr " + b.Ptr +
               ", i32 0, i32 " + std::to_string(idx));
             return {r, m->Ty};
         }
@@ -703,7 +705,7 @@ public:
                     if (ed == EnumByName.end())
                         throw Unsupported{m->Sp, "enum desconocido en el backend llvm"};
                     int vi = VariantIndex(ed->second, m->Name);
-                    std::string eid = CppId(m->EnumKey);
+                    std::string eid = Q(CppId(m->EnumKey));
                     std::string t = AllocaT("%" + eid);
                     I("store %" + eid + " zeroinitializer, ptr " + t);
                     std::string tp = N();
@@ -712,7 +714,7 @@ public:
                     I("store i64 " + std::to_string(vi) + ", ptr " + tp);
                     std::string r = N();
                     I(r + " = load %" + eid + ", ptr " + t);
-                    return {"%" + CppId(m->EnumKey), r, e->Ty};
+                    return {"%" + Q(CppId(m->EnumKey)), r, e->Ty};
                 }
                 LVal lv = GenLval(e);
                 std::string lt = LT(e->Ty, e->Sp);
@@ -994,11 +996,11 @@ public:
                     sig += args[i].first + " " + args[i].second;
                 }
                 if (ret == "void") {
-                    I("call void @" + c->TargetName + "(" + sig + ")");
+                    I("call void @" + Q(c->TargetName) + "(" + sig + ")");
                     return {"void", "", Type::Void()};
                 }
                 std::string r = N();
-                I(r + " = call " + ret + " @" + c->TargetName + "(" + sig + ")");
+                I(r + " = call " + ret + " @" + Q(c->TargetName) + "(" + sig + ")");
                 return {ret, r, c->Ty};
             }
             case CallExpr::Target::EnumCtor: {
@@ -1007,7 +1009,7 @@ public:
                     throw Unsupported{c->Sp, "enum desconocido en el backend llvm"};
                 int vi = VariantIndex(ed->second, c->VariantName);
                 auto args = GenArgs(c);
-                std::string tid = CppId(c->TargetName);
+                std::string tid = Q(CppId(c->TargetName));
                 std::string t = N();
                 I(t + " = alloca %" + tid);
                 I("store %" + tid + " zeroinitializer, ptr " + t);
@@ -1044,7 +1046,7 @@ public:
                     throw Unsupported{c->Sp, "struct desconocido en el backend llvm"};
                 TypeDecl* td = it->second;
                 CurModule = td->Module;
-                std::string tid = CppId(c->TargetName);
+                std::string tid = Q(CppId(c->TargetName));
                 bool named = !c->Args.empty() && !c->Args[0].Name.empty();
                 std::vector<std::string> vals(td->Fields.size(), "");
                 for (size_t i = 0; i < c->Args.size(); i++) {
@@ -1094,7 +1096,7 @@ public:
                 if (bt.IsMap()) return GenCollMethod(c, m, bt);
                 LVal recv = GenLval(m->Base.get());
                 auto args = GenArgs(c);
-                std::string full = CppId(Canoniza(bt.Name)) + "__" + c->TargetName;
+                std::string full = Q(CppId(Canoniza(bt.Name)) + "__" + c->TargetName);
                 std::string ret = c->Ty.K == TK::Void ? "void" : LT(c->Ty, c->Sp);
                 std::string sig = "ptr " + recv.Ptr;
                 for (auto& a : args) sig += ", " + a.first + " " + a.second;
@@ -1605,7 +1607,7 @@ public:
                 Term("br i1 " + cond + ", label %" + bodyL + ", label %" + fallthrough);
             } else {
                 std::string tagp = N(), tag = N(), cond = N();
-                I(tagp + " = getelementptr inbounds %" + CppId(enumKey) + ", ptr " + sp +
+                I(tagp + " = getelementptr inbounds %" + Q(CppId(enumKey)) + ", ptr " + sp +
                   ", i32 0, i32 0");
                 I(tag + " = load i64, ptr " + tagp);
                 I(cond + " = icmp eq i64 " + tag + ", " + std::to_string(arm.Pat.TagIndex));
@@ -1623,7 +1625,7 @@ public:
                         if (fp != ek->second.end()) pos = fp->second;
                     }
                     std::string bp = N();
-                    I(bp + " = getelementptr inbounds %" + CppId(enumKey) + ", ptr " + sp +
+                    I(bp + " = getelementptr inbounds %" + Q(CppId(enumKey)) + ", ptr " + sp +
                       ", i32 0, i32 " + std::to_string(1 + pos));
                     LetBind(arm.Pat.Bindings[j], bp);
                 }
@@ -1659,7 +1661,7 @@ public:
         for (auto& td : Prog->Types)
             for (auto& m : td->Methods) {
                 if (!td->TypeParams.empty()) continue;
-                EmitFnDecl(*m, CppId(Key(td->Module, td->Name)) + "__" + m->Name);
+                EmitFnDecl(*m, Q(CppId(Key(td->Module, td->Name)) + "__" + m->Name));
             }
         for (size_t i = 0; i < PendColl.size(); i++)
             EmitCollStr(PendColl[i].first, PendColl[i].second);
@@ -1827,7 +1829,7 @@ public:
                 }
                 ls_args.push_back(a);
             }
-            std::string call = "  call void @" + objetivo + "(";
+            std::string call = "  call void @" + Q(objetivo) + "(";
             for (size_t i = 0; i < ls_args.size(); i++) {
                 if (i) call += ", ";
                 call += LT(ts[i], hallado->Sp) + " " + ls_args[i];
@@ -1986,7 +1988,7 @@ public:
             if (!td->TypeParams.empty()) continue;
             std::string key = CppId(Key(td->Module, td->Name));
             CurModule = td->Module;
-            std::string s = "%" + key + " = type { ";
+            std::string s = "%" + Q(key) + " = type { ";
             for (size_t i = 0; i < td->Fields.size(); i++) {
                 if (i) s += ", ";
                 s += LT(TypeOf(td->Fields[i].Ty), td->Fields[i].Sp);
@@ -2006,7 +2008,7 @@ public:
                     order.push_back(f.Name);
                 }
             CurModule = "";
-            std::string s = "%" + CppId(key) + " = type { i64";
+            std::string s = "%" + Q(CppId(key)) + " = type { i64";
             for (size_t i = 0; i < order.size(); i++) {
                 s += ", " + LT(kinds[order[i]], ed->Sp);
                 EnumFieldPos[key][order[i]] = (int)i;
@@ -2100,7 +2102,7 @@ public:
         CurModule = fd.Module;
         std::string ret = fd.HasRet ? LT(TypeOf(fd.Ret), fd.Sp) : "void";
         std::string sig = "define internal " + ret + " @" +
-                          (nameOverride.empty() ? Key(fd.Module, fd.Name) : nameOverride) + "(";
+                          (nameOverride.empty() ? Q(Key(fd.Module, fd.Name)) : nameOverride) + "(";
         for (size_t i = 0; i < fd.Params.size(); i++) {
             if (i) sig += ", ";
             sig += ParamLT(fd.Params[i]) + " %a" + std::to_string(i);
@@ -2225,7 +2227,7 @@ public:
                            int idx) {
         Type ft = TypeOf(f.Ty);
         std::string fp = N();
-        I(fp + " = getelementptr inbounds %" + CppId(aggKey) + ", ptr " + vreg + ", i32 0, i32 " +
+        I(fp + " = getelementptr inbounds %" + Q(CppId(aggKey)) + ", ptr " + vreg + ", i32 0, i32 " +
           std::to_string(idx));
         if (ft.IsStr() || ft.IsArray() || ft.IsMap()) {
             std::string r = N();
@@ -2234,7 +2236,7 @@ public:
         }
         if (ft.IsStruct() || ft.IsEnum()) {
             std::string r = N();
-            I(r + " = call ptr @sylt.str_of__" + CppId(ft.Name) + "(ptr " + fp + ")");
+            I(r + " = call ptr @" + Q("sylt.str_of__" + CppId(ft.Name)) + "(ptr " + fp + ")");
             return r;
         }
         std::string lt = LT(ft, f.Sp);
@@ -2266,7 +2268,7 @@ public:
         std::string t3 = N();
         I(t3 + " = call ptr @sylt.str_concat(ptr " + acc + ", ptr " + endp + ")");
         Term("ret ptr " + t3);
-        Bs << "define private ptr @sylt.str_of__" << CppId(key) << "(ptr %a0) {\n"
+        Bs << ("define private ptr @" + Q("sylt.str_of__" + CppId(key)) + "(ptr %a0) {\n")
            << Junta() << "}\n\n";
     }
 
@@ -2278,7 +2280,7 @@ public:
         VarPtr.clear();
         Open("");
         std::string tagp = N();
-        I(tagp + " = getelementptr inbounds %" + CppId(key) + ", ptr %a0, i32 0, i32 0");
+        I(tagp + " = getelementptr inbounds %" + Q(CppId(key)) + ", ptr %a0, i32 0, i32 0");
         std::string tag = N();
         I(tag + " = load i64, ptr " + tagp);
         std::string rp = AllocaT("ptr");
@@ -2325,7 +2327,7 @@ public:
         I(r + " = load ptr, ptr " + rp);
         Term("ret ptr " + r);
         (void)unk;
-        Bs << "define private ptr @sylt.str_of__" << CppId(key) << "(ptr %a0) {\n"
+        Bs << ("define private ptr @" + Q("sylt.str_of__" + CppId(key)) + "(ptr %a0) {\n")
            << Junta() << "}\n\n";
     }
 

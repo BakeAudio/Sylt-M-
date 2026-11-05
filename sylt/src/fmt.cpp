@@ -124,9 +124,10 @@ std::vector<RawTok> LexLinea(const std::string& s) {
             i = j;
             continue;
         }
-        if (isalpha((unsigned char)c) || c == '_') {
+        if (isalpha((unsigned char)c) || c == '_' || (unsigned char)c >= 0x80) {
             size_t j = i;
-            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_')) j++;
+            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_' ||
+                             (unsigned char)s[j] >= 0x80)) j++;
             std::string w = s.substr(i, j - i);
             out.push_back({ClasificarPalabra(w), w});
             i = j;

@@ -39,6 +39,7 @@ Palette Palette::Make(bool color) {
     };
 }
 void Reporter::Emit(const Diag& d) {
+    if (Quiet > 0) return;
     if (Sink) {
         if (d.Severity == Diag::Sev::Error) Errors++;
         else Warnings++;
@@ -78,17 +79,17 @@ void Reporter::RenderBox(const SourceFile& F, const Diag::Note& n, FILE* out) co
     std::snprintf(numbuf, sizeof(numbuf), "%d", ln);
     std::string num(numbuf);
     std::string gutter = std::string(num.size(), ' ');
-    std::fprintf(out, "%s  ┌─ %s:%d:%d%s\n", P.Dim.c_str(), F.Name.c_str(), ln, n.Sp.Col,
-                 P.Reset.c_str());
-    std::fprintf(out, "%s  │%s\n", P.Dim.c_str(), P.Reset.c_str());
-    std::fprintf(out, " %s %s│ %s%s\n", num.c_str(), P.Dim.c_str(), P.Reset.c_str(),
-                 line.c_str());
     int col = n.Sp.Col >= 1 ? n.Sp.Col : 1;
     int len = n.Sp.Len > 0 ? n.Sp.Len : 1;
     if (len < 1) len = 1;
     int dcol = 1 + (int)CodepointsBefore(line, (size_t)(col - 1));
     int dlen = (int)CodepointsInRange(line, (size_t)(col - 1), (size_t)len);
     if (dlen < 1) dlen = 1;
+    std::fprintf(out, "%s  ┌─ %s:%d:%d%s\n", P.Dim.c_str(), F.Name.c_str(), ln, dcol,
+                 P.Reset.c_str());
+    std::fprintf(out, "%s  │%s\n", P.Dim.c_str(), P.Reset.c_str());
+    std::fprintf(out, " %s %s│ %s%s\n", num.c_str(), P.Dim.c_str(), P.Reset.c_str(),
+                 line.c_str());
     std::string pad((size_t)(dcol - 1), ' ');
     std::string carets((size_t)dlen, '^');
     std::string label = n.Text.empty() ? "" : " " + n.Text;

@@ -13,7 +13,7 @@
 using namespace sylt;
 static void PrintUsage() {
     std::cout <<
-        "syltc — compilador de Sylt (0.6)\n"
+        "syltc — compilador de Sylt (0.7.3)\n"
         "\n"
         "Uso:\n"
         "  syltc run   archivo.sy      compila en un temporal y ejecuta\n"
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string s = argv[i];
         if (s == "--version" || s == "-v") {
-            std::cout << "syltc 0.6.0 — compilador de Sylt\n";
+            std::cout << "syltc 0.7.3 — compilador de Sylt\n";
             return 0;
         }
         if (s == "--help" || s == "-h" || s == "help") {
@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
     Reporter Rep(Src, A.Color);
     Loader Ld(Rep, Lib);
     Ld.PkgDir = ResolvePkgDir(A.Pkg);
-    if (!Ld.Load(A.Archivos[0], "__main__", false)) {
+    if (!Ld.Load(A.Archivos[0], "__main__", false, Span())) {
         std::cout << "no se pudo compilar: " << Rep.ErrorCount()
                   << (Rep.ErrorCount() == 1 ? " error, " : " errores, ")
                   << Rep.WarningCount()
@@ -353,7 +353,8 @@ int main(int argc, char** argv) {
     else if (WIFSIGNALED(Status)) ExitCode = 128 + WTERMSIG(Status);
     if (!A.Keep) {
         std::string Clean = "rm -rf \"" + TmpDir + "\"";
-        std::system(Clean.c_str());
+        int Limpieza = std::system(Clean.c_str());
+        (void)Limpieza;
     }
     return ExitCode;
 }

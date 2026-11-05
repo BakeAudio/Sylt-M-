@@ -1,6 +1,6 @@
 # Sylt
 
-> **Sylt 0.6**, un lenguaje de programación compilado con la velocidad de C++ y la legibilidad de Python. Sintaxis por indentación, structs con métodos, **genéricos ligeros `type Caja[T]`**, enums con `match` exhaustivo, módulos con `import`, **pruebas integradas con `sylt test`**, bindings `foreign` a C++ sin FFI, movimiento y préstamos al estilo Rust (versión ligera), y mensajes de error que **explican en vez de regañar**. El mismo binario trae formateador (`syltc fmt`), servidor de lenguaje (`syltc lsp`) y gestor de paquetes (`syltc pkg`).
+> **Sylt 0.7**, un lenguaje de programación compilado con la velocidad de C++ y la legibilidad de Python. Sintaxis por indentación, structs con métodos, **genéricos ligeros `type Caja[T]`**, enums con `match` exhaustivo, módulos con `import`, **pruebas integradas con `sylt test`**, bindings `foreign` a C++ sin FFI, movimiento y préstamos al estilo Rust (versión ligera), y mensajes de error que **explican en vez de regañar**. El mismo binario trae formateador (`syltc fmt`), servidor de lenguaje (`syltc lsp`) y gestor de paquetes (`syltc pkg`).
 
 | Qué promete | Cómo lo cumple |
 |---|---|
@@ -591,10 +591,16 @@ syltc fmt --check . || echo "hay archivos sin formatear"
 syltc lsp
 ```
 
-Habla JSON-RPC 2.0 por stdin/stdout con la codificación estándar `Content-Length`, así que vale cualquier cliente LSP. Lo que ofrece en v0.6:
+Habla JSON-RPC 2.0 por stdin/stdout con la codificación estándar `Content-Length`, así que vale cualquier cliente LSP. Lo que ofrece:
 
 - **Diagnósticos en vivo**: al abrir o editar un archivo (`textDocument/didOpen` / `didChange`) ejecuta el mismo lexer, parser y checker que `syltc check` y publica los errores con código, posición y ayuda: tipos, movimiento, préstamos, `match` incompleto, nombres mal escritos con sugerencia.
 - **Formato del documento**: la petición `textDocument/formatting` devuelve el texto que produciría `syltc fmt`, para formatear desde el editor.
+- **Hover**: `textDocument/hover` documenta la palabra bajo el cursor: firma de funciones y métodos, campos de los structs, variantes de los enums, funciones integradas y palabras clave.
+- **Autocompletado**: `textDocument/completion` propone palabras clave, integradas, funciones, tipos, enums y módulos importados; tras un punto (disparador `.`) lista solo los miembros de ese módulo.
+- **Columnas UTF-16**: las posiciones se convierten de bytes a unidades UTF-16 como pide el estándar LSP (`positionEncoding: utf-16` anunciado en `initialize`); la línea de comandos muestra la columna en caracteres.
+- **Diagnósticos por archivo**: cada análisis publica los errores de todos los archivos del grafo de módulos, incluidos los buffers abiertos sin guardar, y limpia los diagnósticos que ya no aplican.
+- **Análisis aplazado**: las ediciones se acumulan y el análisis se ejecuta unos 300 ms después de la última tecla, para no reanalizar el programa entero con cada pulsación.
+- **Frames defectuosos**: un mensaje sin `Content-Length`, con longitud 0 o mayor de 64 MiB recibe un error `-32600` y la sesión continúa.
 
 Los diagnósticos salen del mismo checker que el compilador: lo que ves en el editor es exactamente lo que `syltc build` dirá. El archivo se analiza contra los módulos de su carpeta y la `std.*`; el registro de paquetes (`SYLT_PKG`) también participa.
 
@@ -675,6 +681,7 @@ Los símbolos de un módulo se prefijan con su nombre (`matematicas.Doble` → `
 - `Clone(x)` copia explícitamente cualquier cosa, incluidos structs y enums.
 - `Str(x)` e interpolación imprimen estructuras como `Vec2{X: 3.0, Y: 4.0}`, enums como `Enviado{tracking: SY-42}`, arrays `[1, 2, 3]` y mapas `{Ana: 31}`.
 - Comentarios con `#` hasta fin de línea. Conviene que los identificadores vayan en **PascalCase**, es el estilo de los ejemplos y de la std, no una norma del compilador.
+- Los identificadores admiten letras Unicode: tildes y eñes (`Año`, `Número`, `días`), además del latino extendido, griego y cirílico. Las palabras clave son ASCII y los nombres de paquete se mantienen en ASCII; un carácter no reconocido se reporta tal cual en E0101.
 
 ---
 
@@ -688,9 +695,15 @@ Los símbolos de un módulo se prefijan con su nombre (`matematicas.Doble` → `
 
 **v0.5.1, concurrencia y llvm completo**: hilos (`std.hilo`) con servidor multihilo de demostración, backend llvm con colecciones, `std.*` y `sylt test`.
 
-**v0.6.0, herramientas (esta versión)**: `syltc fmt` con estilo canónico y `--check` para CI, `syltc lsp` con diagnósticos en vivo y formato desde el editor, `syltc pkg` con paquetes locales y de git.
+**v0.6.0, herramientas**: `syltc fmt` con estilo canónico y `--check` para CI, `syltc lsp` con diagnósticos en vivo y formato desde el editor, `syltc pkg` con paquetes locales y de git.
 
-**v0.7, en marcha**: hover y autocompletado en el lsp, registro público de paquetes con versiones, `syltc doc`.
+**v0.7.1, módulos y movimiento**: nombre de módulo compartido por dos fuentes reportado (E0703), los directorios ya no valen como módulo, los errores de importación señalan la línea del `import`, el movimiento dentro de bucles se detecta y las ramas `if`/`else` ya no producen falsos E0501.
+
+**v0.7.2, editor completo**: hover y autocompletado en el lsp, columnas en unidades UTF-16 y columna del CLI en caracteres, diagnósticos para cada archivo del grafo de módulos, análisis aplazado tras la última tecla y recuperación ante mensajes defectuosos; identificadores con letras acentuadas; el loader usa `std::filesystem` y resuelve la ruta del ejecutable también en macOS y Windows.
+
+**v0.7.3, servidor resistente (esta versión)**: el lsp ya no muere al analizar código con errores de sintaxis (los diagnósticos del cargador apuntaban a memoria liberada y el editor caía con `std::bad_alloc` justo cuando más se usa, al escribir código a medias); ante cualquier error interno el servidor responde -32603 y continúa; hover y autocompletado sobre código roto y sobre un punto cuyo receptor no es módulo cubiertos por pruebas; los `std::system` comprueban su resultado y `make` compila desde cero con -Werror sin ajustes extra.
+
+**v0.8, en marcha**: registro público de paquetes con versiones, `syltc doc` y portabilidad completa del formateador y de `syltc pkg` fuera de POSIX.
 
 ---
 
@@ -706,7 +719,7 @@ Los símbolos de un módulo se prefijan con su nombre (`matematicas.Doble` → `
 | E0401-E0408 | Tipos: incompatible, condición no-bool, no-iterable, falta `return`, struct recursivo |
 | E0501-E0504 | Movimiento y préstamos: use-after-move, asignar a movido, préstamos conflictivos, mutar inmutable |
 | E0601-E0603 | Enums: match no exhaustivo, patrón/variante equivocado, campo compartido con tipos distintos |
-| E0701-E0702 | Módulos: no encontrado, importación circular |
+| E0701-E0703 | Módulos: no encontrado, importación circular, nombre compartido por dos fuentes |
 | E0801 | foreign: tipo no admitido en la frontera C++ |
 | E0901 | backend llvm: construcción no soportada todavía (el núcleo, colecciones, `std.*` y pruebas sí lo están) |
 | W0001 | Variable declarada y no usada (nómbrala `_X` para silenciar) |
